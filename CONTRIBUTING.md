@@ -44,6 +44,7 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture informatio
 ### 1. Pick an Issue
 
 Check the [issue tracker](https://github.com/camshaft/ojo/issues) for open issues. Look for:
+
 - Issues labeled `good first issue` for beginners
 - Issues labeled `help wanted` for community contributions
 - The [PROJECT_PLAN.md](PROJECT_PLAN.md) for implementation roadmap
@@ -98,7 +99,7 @@ cargo bench -p ojo-client
 
 ### Documentation
 
-```rust
+````rust
 /// Brief description of the function
 ///
 /// More detailed explanation if needed.
@@ -116,7 +117,7 @@ cargo bench -p ojo-client
 pub fn some_function() -> Result<()> {
     // implementation
 }
-```
+````
 
 ### Testing
 
@@ -128,6 +129,7 @@ pub fn some_function() -> Result<()> {
 ### Performance
 
 For ojo-client specifically:
+
 - Profile code paths on the hot path (event recording)
 - Avoid allocations in performance-critical code
 - Use atomic operations appropriately
@@ -146,6 +148,7 @@ Follow conventional commit format:
 ```
 
 Types:
+
 - `feat`: New feature
 - `fix`: Bug fix
 - `docs`: Documentation changes
@@ -155,6 +158,7 @@ Types:
 - `chore`: Maintenance tasks
 
 Examples:
+
 ```
 feat(client): implement lock-free ring buffer
 
@@ -202,7 +206,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn benchmark_event_recording(c: &mut Criterion) {
     let tracer = create_tracer();
-    
+
     c.bench_function("record_packet_sent", |b| {
         b.iter(|| {
             tracer.record_packet_sent(black_box(1), black_box(100));
@@ -226,6 +230,7 @@ criterion_main!(benches);
 ### Architecture Documents
 
 When making significant changes:
+
 - Update [ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - Update [PROJECT_PLAN.md](PROJECT_PLAN.md) if changing roadmap
 - Add design documents for major features
@@ -291,8 +296,4 @@ Be respectful, inclusive, and constructive. We want Ojo to be a welcoming projec
 
 ## License
 
-By contributing to Ojo, you agree that your contributions will be licensed under the same license as the project (MIT OR Apache-2.0).
-
----
-
-Thank you for contributing to Ojo! 🎉
+By contributing to Ojo, you agree that your contributions will be licensed under the same license as the project (MIT).

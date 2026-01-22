@@ -49,6 +49,7 @@ enum Commands {
 
 /// Configuration for the watcher
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 struct WatcherConfig {
     input_dir: PathBuf,
     db_path: PathBuf,
@@ -57,6 +58,7 @@ struct WatcherConfig {
 
 /// Configuration for the explorer server
 #[derive(Debug, Clone)]
+#[expect(dead_code)]
 struct ExplorerConfig {
     db_path: PathBuf,
     port: u16,

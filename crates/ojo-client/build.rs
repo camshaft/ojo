@@ -111,11 +111,7 @@ fn main() {
     }
 
     // Generate the module
-    writeln!(
-        f,
-        "/// Event type constants as defined in the specification"
-    )
-    .unwrap();
+    writeln!(f, "/// Event type constants").unwrap();
     writeln!(f, "///").unwrap();
     writeln!(
         f,
@@ -125,7 +121,7 @@ fn main() {
     writeln!(f, "/// and provide reflection capabilities.").unwrap();
     writeln!(f, "pub mod event_type {{").unwrap();
     writeln!(f, "    use super::EventTypeInfo;").unwrap();
-    writeln!(f, "").unwrap();
+    writeln!(f).unwrap();
 
     // Generate constants
     for (value, name, _, description) in &events {

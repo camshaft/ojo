@@ -18,10 +18,13 @@ Ojo is a low-overhead, high-performance event tracing system designed for debugg
 Ojo consists of two main components:
 
 ### 1. **ojo-client** - Client Library
+
 Rust library for collecting and writing events to binary files with minimal overhead.
 
 ### 2. **ojo** - CLI Tool
+
 Combined tool with subcommands:
+
 - `ojo watch` - Monitors trace directories and transforms binary data into queryable database
 - `ojo serve` - Web-based interface for querying and visualizing trace data in real-time
 
@@ -73,10 +76,10 @@ ojo serve --db-path ./traces.db --port 8080
 
 ## Event Types
 
-Ojo supports comprehensive event tracking:
+Ojo supports several types of event tracking:
 
 - **Packet Events**: Create, send, ACK, loss, retransmit
-- **Stream Events**: Open, FIN sent, FIN ACK, parent linking
+- **Stream Events**: Open, FIN sent, FIN ACK
 - **Flow Control**: Connection and stream-level max data updates
 - **Congestion Control**: CWND, ssthresh, loss detection state
 

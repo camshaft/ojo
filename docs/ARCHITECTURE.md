@@ -13,11 +13,13 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 **Key Components**:
 
 #### Tracer
+
 - Public API for recording events
 - Configuration management
 - Lifecycle management (init/shutdown)
 
 #### Lock-free Ring Buffer
+
 - Fixed-size circular buffer (default: 512 MiB)
 - Atomic operations for multi-writer access
 - Zero-allocation on hot path
@@ -26,6 +28,7 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 - `AtomicU64` for dropped event counter
 
 #### Background Flusher Thread
+
 - Single reader for the ring buffer
 - Periodic flushes (configurable interval)
 - Writes to staging directory
@@ -33,6 +36,7 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 - Handles dropped event recording
 
 **Data Flow**:
+
 1. Application calls event recording method
 2. Event struct populated with timestamp and data
 3. Atomic CAS loop to reserve buffer space
@@ -49,22 +53,26 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 **Key Components**:
 
 #### File System Watcher (ojo watch)
+
 - Monitors output directory for new `.bin` files
 - Debouncing to handle file completion
 
 #### Binary Parser
+
 - Zero-copy deserialization with `zerocopy`
-- Validates 24-byte header (magic, version)
-- Reads 32-byte event records
+- Validates header (magic, version)
+- Reads event records
 - Detects and logs dropped events
 
 #### Database Writer
+
 - Inserts events into normalized schema
 - Builds flow hierarchy from STREAM_LINK_PARENT events
 - Creates indexes for efficient queries
 - Transaction batching for performance
 
 #### Transformation Pipeline
+
 ```
 .bin file → Validate Header → Parse Events → Transform → Insert → Index
 ```
@@ -115,15 +123,18 @@ CREATE INDEX idx_timestamp ON events(timestamp_ns);
 **Key Components**:
 
 #### REST API (Axum)
+
 Provides endpoints for querying trace data and retrieving flow information.
 
 #### Query Engine
+
 - SQL query builder
 - Filter by flow_id, event_type, time range
 - Pagination support
 - Aggregation queries (stats, counts)
 
 #### Web Frontend
+
 - TypeScript with Vite build system
 - Tailwind CSS for styling
 - Observable Plot for visualizations
@@ -131,6 +142,7 @@ Provides endpoints for querying trace data and retrieving flow information.
 - Responsive design
 
 **Visualizations**:
+
 1. **Offset Timeline** - Overlay of offsets being transmitted, acked, retransmitted for a given flow
 2. **Stream Lifecycle** - Stream durations and relationships
 3. **Congestion Window** - CWND evolution over time
@@ -140,6 +152,7 @@ Provides endpoints for querying trace data and retrieving flow information.
 ## Binary Format Specification
 
 ### File Header (24 bytes)
+
 ```
 Offset | Size | Field           | Value/Type
 -------+------+-----------------+-----------
@@ -151,6 +164,7 @@ Offset | Size | Field           | Value/Type
 ```
 
 ### Event Record (32 bytes)
+
 ```
 Offset | Size | Field           | Type
 -------+------+-----------------+------
@@ -161,6 +175,7 @@ Offset | Size | Field           | Type
 ```
 
 **Key Properties**:
+
 - Fixed size for predictable layout
 - Little-endian encoding
 - Aligned to 8-byte boundaries
@@ -172,12 +187,14 @@ Offset | Size | Field           | Type
 ### ojo-client
 
 **Multi-writer, Single-reader**:
+
 - Multiple threads can record events concurrently
 - Lock-free CAS operations for buffer space reservation
 - Single background thread for flushing
 - Memory fences ensure visibility across threads
 
 **Synchronization Points**:
+
 1. Buffer space reservation (CAS on write_head)
 2. Visibility fence after write
 3. Flush notification (condvar)
@@ -186,6 +203,7 @@ Offset | Size | Field           | Type
 ### ojo (CLI tool)
 
 **Single-threaded processing**:
+
 - One file at a time (no concurrent file processing)
 - Database writer in WAL mode for better concurrency
 - Can process files while client is writing new ones
@@ -194,21 +212,25 @@ Offset | Size | Field           | Type
 ## Failure Modes and Recovery
 
 ### Buffer Overflow (Client)
+
 - When buffer is full, increment dropped_count
 - Drop the event and move on
 - Flusher records EVENTS_DROPPED event
 
 ### File System Issues
+
 - **No space**: Flusher logs error, continues
 - **Permission denied**: Fatal error on init
 - **Staging rename fails**: Fatal error to avoid data loss
 
 ### Database Issues (Watcher)
+
 - **Corrupt file**: Log warning, skip file
 - **Insert fails**: Transaction rollback, retry
 - **Disk full**: Stop processing, log error
 
 ### Web Server Issues (Explorer)
+
 - **DB locked**: Retry with timeout
 - **Query timeout**: Return partial results
 - **Memory limit**: Implement result pagination
@@ -216,6 +238,7 @@ Offset | Size | Field           | Type
 ## Extension Points
 
 ### Custom Event Types
+
 - Define new event_type constants
 - Update event_types table
 - No code changes required in client
@@ -223,6 +246,7 @@ Offset | Size | Field           | Type
 ### Alternative Storage Backends
 
 Potential database backends to support:
+
 - SQLite - Simple, embedded, good for single-user scenarios
 - DuckDB - Analytical queries, columnar storage
 - Apache Arrow/Parquet - Language-agnostic, excellent for analytics
@@ -230,6 +254,7 @@ Potential database backends to support:
 - ClickHouse - Distributed analytical queries
 
 ### Custom Visualizations
+
 - Plugin architecture for new chart types
 - Export API for external tools
 - Integration with Grafana
@@ -237,16 +262,19 @@ Potential database backends to support:
 ## Security Considerations
 
 ### Client
+
 - No network exposure
 - File system permissions for trace directory
 - No sensitive data in traces (user responsibility)
 
 ### Watcher
+
 - Local file access only
 - Database injection prevention (parameterized queries)
 - File validation before parsing
 
 ### Explorer
+
 - Read-only database access
 - CORS configuration for API
 - No authentication (local use assumed)
@@ -255,6 +283,7 @@ Potential database backends to support:
 ## Deployment Patterns
 
 ### Development
+
 ```
 ojo-client (embedded in app)
   ↓
@@ -268,6 +297,7 @@ http://localhost:8080 (browser)
 ```
 
 ### Production
+
 ```
 ojo-client (embedded)
   ↓
@@ -281,6 +311,7 @@ https://traces.example.com (browser)
 ```
 
 ### Distributed
+
 ```
 Multiple clients on different hosts
   ↓
@@ -296,18 +327,16 @@ ojo serve cluster
 ## Future Enhancements
 
 ### Short-term
+
 - Apache Arrow backend for analytical queries
 - Real-time streaming (bypass files)
 - Advanced visualizations
 - Filtering at collection time
 
 ### Long-term
+
 - Distributed tracing across processes
 - Language bindings (C, Go, Python)
 - Machine learning anomaly detection
 - Trace comparison and diff tools
 - Integration with observability platforms
-
----
-
-**Last Updated**: January 22, 2026
