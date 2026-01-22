@@ -10,7 +10,7 @@ Ojo is a low-overhead, high-performance event tracing system designed for debugg
 - **Queryable Storage**: Transform binary traces into queryable database
 - **Browser-Based Explorer**: Visualize packet flows, streams, and congestion control
 - **Real-time Monitoring**: Watch directories for new traces and update live
-- **Fixed-size Binary Format**: Predictable 24-byte records for zero-copy parsing
+- **Fixed-size Binary Format**: Fixed-sized records for zero-copy parsing
 - **Thread-safe**: Multi-writer, single-reader architecture
 
 ## Architecture
