@@ -1,15 +1,11 @@
-//! # ojo-watcher
+//! # ojo
 //!
-//! Watcher daemon for monitoring trace directories and transforming
-//! binary trace files into a queryable SQLite database.
+//! Combined watcher and explorer for ojo trace files.
 //!
 //! ## Features
 //!
-//! - Directory monitoring with real-time file detection
-//! - Binary trace file parsing
-//! - SQLite database transformation
-//! - Flow hierarchy reconstruction
-//! - Dropped event detection and logging
+//! - Watch directories for new trace files and transform them
+//! - Serve a web interface for exploring and visualizing traces
 
 use std::path::PathBuf;
 
@@ -21,11 +17,8 @@ pub struct WatcherConfig {
     /// Directory to watch for trace files
     pub input_dir: PathBuf,
 
-    /// Path to the SQLite database
+    /// Path to the database
     pub db_path: PathBuf,
-
-    /// Whether to continuously watch for new files
-    pub watch: bool,
 
     /// Age threshold for cleaning up old trace files (in seconds)
     pub cleanup_age_secs: Option<u64>,
@@ -36,7 +29,6 @@ impl Default for WatcherConfig {
         Self {
             input_dir: PathBuf::from("./traces/output"),
             db_path: PathBuf::from("./traces.db"),
-            watch: false,
             cleanup_age_secs: None,
         }
     }
@@ -51,9 +43,9 @@ impl Watcher {
     /// Create a new watcher with the given configuration
     pub fn new(config: WatcherConfig) -> Result<Self> {
         // TODO: Implement watcher initialization
-        // - Open/create SQLite database
+        // - Open/create database
         // - Initialize schema
-        // - Set up file system watcher if watch mode enabled
+        // - Set up file system watcher
 
         Ok(Self { _config: config })
     }
@@ -71,14 +63,62 @@ impl Watcher {
     }
 }
 
+/// Configuration for the explorer server
+#[derive(Debug, Clone)]
+pub struct ExplorerConfig {
+    /// Path to the database
+    pub db_path: PathBuf,
+
+    /// Port to bind the web server to
+    pub port: u16,
+
+    /// Host to bind to
+    pub host: String,
+}
+
+impl Default for ExplorerConfig {
+    fn default() -> Self {
+        Self {
+            db_path: PathBuf::from("./traces.db"),
+            port: 8080,
+            host: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+/// Main explorer server instance
+pub struct Explorer {
+    _config: ExplorerConfig,
+}
+
+impl Explorer {
+    /// Create a new explorer with the given configuration
+    pub fn new(config: ExplorerConfig) -> Result<Self> {
+        // TODO: Implement explorer initialization
+        Ok(Self { _config: config })
+    }
+
+    /// Start the web server (blocking)
+    pub async fn serve(&self) -> Result<()> {
+        // TODO: Set up Axum server with routes
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_config_default() {
+    fn test_watcher_config_default() {
         let config = WatcherConfig::default();
-        assert_eq!(config.watch, false);
         assert!(config.cleanup_age_secs.is_none());
+    }
+
+    #[test]
+    fn test_explorer_config_default() {
+        let config = ExplorerConfig::default();
+        assert_eq!(config.port, 8080);
+        assert_eq!(config.host, "127.0.0.1");
     }
 }

@@ -1,8 +1,7 @@
 [workspace]
 members = [
     "crates/ojo-client",
-    "crates/ojo-watcher",
-    "crates/ojo-explorer",
+    "crates/ojo",
 ]
 resolver = "2"
 

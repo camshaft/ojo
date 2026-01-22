@@ -26,7 +26,3 @@ traces/
 *.db
 *.db-shm
 *.db-wal
-
-# Example outputs
-examples/**/traces/
-examples/**/*.db

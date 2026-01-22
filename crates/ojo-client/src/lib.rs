@@ -15,7 +15,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use ojo_client::{Tracer, TracerConfig};
+//! use ojo_client::{Tracer, TracerConfig, Event, event_type};
 //! use std::path::PathBuf;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -30,9 +30,26 @@
 //! let tracer = Tracer::new(config)?;
 //!
 //! // Record events
-//! tracer.record_packet_sent(1, 100);
-//! tracer.record_packet_acked(1, 100);
-//! tracer.record_stream_opened(1, 10);
+//! tracer.record(Event {
+//!     timestamp_ns: 12345,
+//!     flow_id: 1,
+//!     event_type: event_type::PACKET_SENT,
+//!     payload: 100,
+//! });
+//!
+//! tracer.record(Event {
+//!     timestamp_ns: 12350,
+//!     flow_id: 1,
+//!     event_type: event_type::PACKET_ACKED,
+//!     payload: 100,
+//! });
+//!
+//! tracer.record(Event {
+//!     timestamp_ns: 12360,
+//!     flow_id: 1,
+//!     event_type: event_type::STREAM_OPENED,
+//!     payload: 10,
+//! });
 //!
 //! // Tracer automatically flushes on drop
 //! # Ok(())
@@ -92,6 +109,19 @@ impl TracerConfig {
     }
 }
 
+/// Trace event structure
+#[derive(Debug, Clone, Copy)]
+pub struct Event {
+    /// Timestamp in nanoseconds since tracer start
+    pub timestamp_ns: u64,
+    /// Flow identifier (unique per batch)
+    pub flow_id: u64,
+    /// Event type identifier
+    pub event_type: u64,
+    /// Event payload
+    pub payload: u64,
+}
+
 /// Main tracer handle for recording events
 pub struct Tracer {
     _config: TracerConfig,
@@ -111,34 +141,28 @@ impl Tracer {
         Ok(Self { _config: config })
     }
 
-    /// Record a packet sent event
-    pub fn record_packet_sent(&self, flow_id: u32, packet_number: u64) {
+    /// Record a trace event
+    ///
+    /// The caller is responsible for populating the event structure,
+    /// including the timestamp, flow_id, event_type, and payload.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use ojo_client::{Tracer, Event, event_type};
+    /// # let tracer = Tracer::new(Default::default()).unwrap();
+    ///
+    /// let event = Event {
+    ///     timestamp_ns: 12345, // Get from monotonic clock
+    ///     flow_id: 1,
+    ///     event_type: event_type::PACKET_SENT,
+    ///     payload: 100, // packet number
+    /// };
+    /// tracer.record(event);
+    /// ```
+    pub fn record(&self, event: Event) {
         // TODO: Implement event recording
-        let _ = (flow_id, packet_number);
-    }
-
-    /// Record a packet acknowledged event
-    pub fn record_packet_acked(&self, flow_id: u32, packet_number: u64) {
-        // TODO: Implement event recording
-        let _ = (flow_id, packet_number);
-    }
-
-    /// Record a stream opened event
-    pub fn record_stream_opened(&self, flow_id: u32, stream_id: u64) {
-        // TODO: Implement event recording
-        let _ = (flow_id, stream_id);
-    }
-
-    /// Record a packet lost (timeout) event
-    pub fn record_packet_lost_timeout(&self, flow_id: u32, packet_number: u64) {
-        // TODO: Implement event recording
-        let _ = (flow_id, packet_number);
-    }
-
-    /// Record a congestion window update event
-    pub fn record_cwnd_updated(&self, flow_id: u32, new_cwnd_bytes: u64) {
-        // TODO: Implement event recording
-        let _ = (flow_id, new_cwnd_bytes);
+        let _ = event;
     }
 }
 
@@ -151,52 +175,52 @@ impl Drop for Tracer {
 /// Event type constants as defined in the specification
 pub mod event_type {
     /// Packet created
-    pub const PACKET_CREATED: u32 = 0x00000001;
+    pub const PACKET_CREATED: u64 = 0x00000001;
 
     /// Packet sent
-    pub const PACKET_SENT: u32 = 0x00000002;
+    pub const PACKET_SENT: u64 = 0x00000002;
 
     /// Packet acknowledged
-    pub const PACKET_ACKED: u32 = 0x00000003;
+    pub const PACKET_ACKED: u64 = 0x00000003;
 
     /// Packet lost due to timeout
-    pub const PACKET_LOST_TIMEOUT: u32 = 0x00000004;
+    pub const PACKET_LOST_TIMEOUT: u64 = 0x00000004;
 
     /// Packet lost due to duplicate ACK
-    pub const PACKET_LOST_DUPLICATE_ACK: u32 = 0x00000005;
+    pub const PACKET_LOST_DUPLICATE_ACK: u64 = 0x00000005;
 
     /// Packet retransmit (old packet number)
-    pub const PACKET_RETRANSMIT_OLD: u32 = 0x00000006;
+    pub const PACKET_RETRANSMIT_OLD: u64 = 0x00000006;
 
     /// Packet retransmit (new packet number)
-    pub const PACKET_RETRANSMIT_NEW: u32 = 0x00000007;
+    pub const PACKET_RETRANSMIT_NEW: u64 = 0x00000007;
 
     /// Stream opened
-    pub const STREAM_OPENED: u32 = 0x00000100;
+    pub const STREAM_OPENED: u64 = 0x00000100;
 
     /// Stream link to parent connection
-    pub const STREAM_LINK_PARENT: u32 = 0x00000101;
+    pub const STREAM_LINK_PARENT: u64 = 0x00000101;
 
     /// Stream FIN sent
-    pub const STREAM_FIN_SENT: u32 = 0x00000102;
+    pub const STREAM_FIN_SENT: u64 = 0x00000102;
 
     /// Stream FIN acknowledged
-    pub const STREAM_FIN_ACKED: u32 = 0x00000103;
+    pub const STREAM_FIN_ACKED: u64 = 0x00000103;
 
     /// Connection max data update
-    pub const CONNECTION_MAX_DATA_UPDATE: u32 = 0x00000200;
+    pub const CONNECTION_MAX_DATA_UPDATE: u64 = 0x00000200;
 
     /// Stream max data update
-    pub const STREAM_MAX_DATA_UPDATE: u32 = 0x00000201;
+    pub const STREAM_MAX_DATA_UPDATE: u64 = 0x00000201;
 
     /// Congestion window updated
-    pub const CWND_UPDATED: u32 = 0x00000300;
+    pub const CWND_UPDATED: u64 = 0x00000300;
 
     /// Slow start threshold updated
-    pub const SSTHRESH_UPDATED: u32 = 0x00000301;
+    pub const SSTHRESH_UPDATED: u64 = 0x00000301;
 
     /// Events dropped due to buffer overflow
-    pub const EVENTS_DROPPED: u32 = 0x0000FF01;
+    pub const EVENTS_DROPPED: u64 = 0x0000FF01;
 }
 
 #[cfg(test)]

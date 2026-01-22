@@ -122,9 +122,9 @@ pub fn some_function() -> Result<()> {
 ### Testing
 
 - Write unit tests in the same file as the code
-- Write integration tests in `tests/` directory
 - Use descriptive test names: `test_buffer_wraps_correctly`
 - Test error cases, not just happy paths
+- Avoid trivial tests (e.g., testing that a getter returns what a setter set)
 
 ### Performance
 
@@ -190,31 +190,6 @@ mod tests {
         let config = TracerConfig::default();
         assert_eq!(config.buffer_size, 512 * 1024 * 1024);
     }
-}
-```
-
-### Integration Tests
-
-Test interactions between components:
-
-```rust
-// tests/integration_test.rs
-#[test]
-fn test_tracer_writes_valid_files() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let tracer = Tracer::new(TracerConfig {
-        output_dir: temp_dir.path().to_path_buf(),
-        ..Default::default()
-    }).unwrap();
-    
-    tracer.record_packet_sent(1, 100);
-    drop(tracer); // Flush
-    
-    // Verify file was created and is valid
-    let files: Vec<_> = std::fs::read_dir(temp_dir.path().join("output"))
-        .unwrap()
-        .collect();
-    assert_eq!(files.len(), 1);
 }
 ```
 

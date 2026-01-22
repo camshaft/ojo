@@ -4,44 +4,6 @@
 
 Ojo is a transport protocol event tracing system consisting of three main components that work together to provide low-overhead event collection, transformation, and visualization.
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        User Application                          │
-│                                                                   │
-│  ┌────────────────────────────────────────────────────────────┐ │
-│  │                      ojo-client                            │ │
-│  │  ┌──────────┐     ┌──────────┐     ┌────────────────┐    │ │
-│  │  │  Tracer  │────▶│  Buffer  │────▶│ Flusher Thread │    │ │
-│  │  │   API    │     │(Lock-free)│     │  (Background)  │    │ │
-│  │  └──────────┘     └──────────┘     └────────┬───────┘    │ │
-│  └─────────────────────────────────────────────┼────────────┘ │
-└────────────────────────────────────────────────┼──────────────┘
-                                                  │
-                                      Binary Files (.bin)
-                           staging/ ──atomic move──▶ output/
-                                                  │
-┌─────────────────────────────────────────────────┼──────────────┐
-│                      ojo-watcher                │               │
-│  ┌───────────────┐     ┌────────────┐     ┌────▼──────────┐   │
-│  │ File System   │────▶│   Parser   │────▶│ SQLite Writer │   │
-│  │   Watcher     │     │ (Binary)   │     │               │   │
-│  └───────────────┘     └────────────┘     └───────────────┘   │
-│                                                  │               │
-└──────────────────────────────────────────────────┼──────────────┘
-                                                    │
-                                            SQLite Database
-                                               traces.db
-                                                    │
-┌───────────────────────────────────────────────────┼─────────────┐
-│                     ojo-explorer                  │              │
-│  ┌───────────┐     ┌──────────┐     ┌────────────▼─────────┐   │
-│  │    Web    │────▶│   API    │────▶│   Query Engine      │   │
-│  │ Interface │◀────│ (Axum)   │◀────│   (SQLite)          │   │
-│  └───────────┘     └──────────┘     └──────────────────────┘   │
-│   Browser                                                        │
-└──────────────────────────────────────────────────────────────────┘
-```
-
 ## Component Details
 
 ### 1. ojo-client (Client Library)
@@ -71,7 +33,7 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 - Handles dropped event recording
 
 **Data Flow**:
-1. Application calls `tracer.record_packet_sent(flow_id, packet_num)`
+1. Application calls event recording method
 2. Event struct populated with timestamp and data
 3. Atomic CAS loop to reserve buffer space
 4. Memory copy to buffer (handles wrap-around)
@@ -79,12 +41,6 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 6. Flusher thread periodically reads buffer
 7. Writes batch to staging file
 8. Atomic rename to output directory
-
-**Performance Characteristics**:
-- < 100 ns per event (hot path)
-- Zero allocations during recording
-- Lock-free writes (only atomic operations)
-- 1M+ events/second with 4 concurrent writers
 
 ### 2. ojo-watcher (Watcher Daemon)
 
@@ -103,7 +59,7 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 - Reads 24-byte event records
 - Detects and logs dropped events
 
-#### SQLite Writer
+#### Database Writer
 - Inserts events into normalized schema
 - Builds flow hierarchy from STREAM_LINK_PARENT events
 - Creates indexes for efficient queries
@@ -117,38 +73,40 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 **Database Schema**:
 
 ```sql
--- Main events table
-CREATE TABLE events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    batch_start_us INTEGER NOT NULL,
-    ts_delta_us INTEGER NOT NULL,
-    flow_id INTEGER NOT NULL,
-    event_type INTEGER NOT NULL,
-    payload INTEGER NOT NULL,
+-- Batches table
+CREATE TABLE batches (
+    batch_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_start_ns INTEGER NOT NULL,
     file_name TEXT NOT NULL
 );
 
--- Event type metadata
-CREATE TABLE event_types (
-    event_type INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    category TEXT NOT NULL,
-    description TEXT
+-- Main events table
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    batch_id INTEGER NOT NULL,
+    ts_delta_ns INTEGER NOT NULL,
+    flow_id INTEGER NOT NULL,
+    event_type INTEGER NOT NULL,
+    payload INTEGER NOT NULL,
+    FOREIGN KEY (batch_id) REFERENCES batches(batch_id)
 );
 
--- Flow hierarchy
+-- Flow hierarchy (flow_id qualified by batch_id)
 CREATE TABLE flows (
-    flow_id INTEGER PRIMARY KEY,
+    batch_id INTEGER NOT NULL,
+    flow_id INTEGER NOT NULL,
     parent_flow_id INTEGER,
     first_event_ts INTEGER,
     last_event_ts INTEGER,
-    event_count INTEGER DEFAULT 0
+    event_count INTEGER DEFAULT 0,
+    PRIMARY KEY (batch_id, flow_id)
 );
 
 -- Indexes
-CREATE INDEX idx_flow_id ON events(flow_id);
+CREATE INDEX idx_batch_id ON events(batch_id);
+CREATE INDEX idx_flow_id ON events(batch_id, flow_id);
 CREATE INDEX idx_event_type ON events(event_type);
-CREATE INDEX idx_timestamp ON events(ts_delta_us);
+CREATE INDEX idx_timestamp ON events(ts_delta_ns);
 ```
 
 ### 3. ojo-explorer (Web Interface)
@@ -158,11 +116,7 @@ CREATE INDEX idx_timestamp ON events(ts_delta_us);
 **Key Components**:
 
 #### REST API (Axum)
-- `/api/flows` - List all flows with metadata
-- `/api/flows/:id/events` - Get events for specific flow
-- `/api/events` - Query events with filters
-- `/api/stats` - Summary statistics
-- `/api/export` - Export data (JSON, CSV)
+Provides endpoints for querying trace data and retrieving flow information.
 
 #### Query Engine
 - SQL query builder
@@ -171,17 +125,18 @@ CREATE INDEX idx_timestamp ON events(ts_delta_us);
 - Aggregation queries (stats, counts)
 
 #### Web Frontend
-- Vanilla JavaScript (no complex build)
-- D3.js for visualizations
+- TypeScript with Vite build system
+- Tailwind CSS for styling
+- Observable Plot for visualizations
 - Real-time updates via polling or WebSocket
 - Responsive design
 
 **Visualizations**:
-1. **Packet Timeline** - Linear view of packet events
-2. **Stream Lifecycle** - Gantt-style stream durations
-3. **Congestion Window** - Line chart of CWND over time
+1. **Offset Timeline** - Overlay of offsets being transmitted, acked, retransmitted for a given flow
+2. **Stream Lifecycle** - Stream durations and relationships
+3. **Congestion Window** - CWND evolution over time
 4. **Flow Control** - Max data progression
-5. **Event Distribution** - Histogram of event types
+5. **Event Distribution** - Event type histograms
 
 ## Binary Format Specification
 
@@ -192,18 +147,18 @@ Offset | Size | Field           | Value/Type
 0      | 4    | magic           | b"TRAC"
 4      | 1    | version         | 1
 5      | 3    | reserved        | [0,0,0]
-8      | 8    | batch_start_us  | u64
+8      | 8    | batch_start_ns  | u64
 16     | 8    | reserved        | 0
 ```
 
-### Event Record (24 bytes)
+### Event Record (32 bytes)
 ```
 Offset | Size | Field           | Type
 -------+------+-----------------+------
-0      | 8    | ts_delta_us     | u64
-8      | 4    | flow_id         | u32
-12     | 4    | event_type      | u32
-16     | 8    | payload         | u64
+0      | 8    | ts_delta_ns     | u64
+8      | 8    | flow_id         | u64
+16     | 8    | event_type      | u64
+24     | 8    | payload         | u64
 ```
 
 **Key Properties**:
@@ -233,49 +188,27 @@ Offset | Size | Field           | Type
 
 **Single-threaded processing**:
 - One file at a time (no concurrent file processing)
-- SQLite writer in WAL mode for better concurrency
+- Database writer in WAL mode for better concurrency
 - Can process files while client is writing new ones
 
 ### ojo-explorer
 
 **Request-per-query**:
 - Each HTTP request is independent
-- SQLite connections from pool
+- Database connections from pool
 - Read-only queries (no write contention)
-
-## Performance Characteristics
-
-### Throughput
-- **Client**: 1M+ events/second (4 writers)
-- **Watcher**: 500K+ events/second parsing
-- **Explorer**: Sub-millisecond query latency
-
-### Latency
-- **Event recording**: < 100 ns (p99)
-- **Flush to disk**: 1-5 seconds (configurable)
-- **Query response**: < 10 ms (typical)
-
-### Memory
-- **Client buffer**: 512 MiB (configurable)
-- **Watcher**: < 100 MiB resident
-- **Explorer**: < 50 MiB + query cache
-
-### Disk
-- **Binary files**: ~24 bytes per event + 24 byte header
-- **SQLite**: ~40-50 bytes per event (with indexes)
-- **Compression**: ~5-10x with gzip (post-processing)
 
 ## Failure Modes and Recovery
 
 ### Buffer Overflow (Client)
 - When buffer is full, increment dropped_count
-- Continue attempting to write (backoff)
+- Drop the event and move on
 - Flusher records EVENTS_DROPPED event
 
 ### File System Issues
 - **No space**: Flusher logs error, continues
 - **Permission denied**: Fatal error on init
-- **Staging rename fails**: Retry with backoff
+- **Staging rename fails**: Fatal error to avoid data loss
 
 ### Database Issues (Watcher)
 - **Corrupt file**: Log warning, skip file
@@ -295,9 +228,13 @@ Offset | Size | Field           | Type
 - No code changes required in client
 
 ### Alternative Storage Backends
-- Apache Arrow/Parquet
-- InfluxDB
-- Prometheus metrics
+
+Potential database backends to support:
+- SQLite - Simple, embedded, good for single-user scenarios
+- DuckDB - Analytical queries, columnar storage
+- Apache Arrow/Parquet - Language-agnostic, excellent for analytics
+- InfluxDB - Time-series optimized
+- ClickHouse - Distributed analytical queries
 
 ### Custom Visualizations
 - Plugin architecture for new chart types
@@ -313,7 +250,7 @@ Offset | Size | Field           | Type
 
 ### Watcher
 - Local file access only
-- SQLite injection prevention (parameterized queries)
+- Database injection prevention (parameterized queries)
 - File validation before parsing
 
 ### Explorer
@@ -330,9 +267,9 @@ ojo-client (embedded in app)
   ↓
 local file system
   ↓
-ojo-watcher --watch (terminal)
+ojo watch (terminal)
   ↓
-ojo-explorer (terminal)
+ojo serve (terminal)
   ↓
 http://localhost:8080 (browser)
 ```
@@ -343,9 +280,9 @@ ojo-client (embedded)
   ↓
 shared/network file system
   ↓
-ojo-watcher (systemd service)
+ojo watch (systemd service)
   ↓
-ojo-explorer (systemd service) + nginx
+ojo serve (systemd service) + nginx
   ↓
 https://traces.example.com (browser)
 ```
@@ -356,11 +293,11 @@ Multiple clients on different hosts
   ↓
 Central NFS/S3 mount
   ↓
-Multiple watchers (partitioned by file)
+ojo watch (processes files)
   ↓
-Single SQLite or migrate to ClickHouse
+Database
   ↓
-ojo-explorer cluster
+ojo serve cluster
 ```
 
 ## Future Enhancements
