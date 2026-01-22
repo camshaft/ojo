@@ -15,37 +15,38 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use ojo_client::{Tracer, TracerConfig, Event, event_type};
+//! use ojo_client::{Tracer, TracerConfig, EventRecord, event_type};
 //! use std::path::PathBuf;
+//! use std::time::Duration;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create a tracer configuration
 //! let config = TracerConfig {
 //!     output_dir: PathBuf::from("./traces"),
 //!     buffer_size: 512 * 1024 * 1024, // 512 MiB
-//!     flush_interval_ms: 1000,         // 1 second
+//!     flush_interval: Duration::from_secs(1),
 //! };
 //!
 //! // Initialize the tracer
 //! let tracer = Tracer::new(config)?;
 //!
 //! // Record events
-//! tracer.record(Event {
-//!     timestamp_ns: 12345,
+//! tracer.record(EventRecord {
+//!     ts_delta_ns: 12345,
 //!     flow_id: 1,
 //!     event_type: event_type::PACKET_SENT,
 //!     payload: 100,
 //! });
 //!
-//! tracer.record(Event {
-//!     timestamp_ns: 12350,
+//! tracer.record(EventRecord {
+//!     ts_delta_ns: 12350,
 //!     flow_id: 1,
 //!     event_type: event_type::PACKET_ACKED,
 //!     payload: 100,
 //! });
 //!
-//! tracer.record(Event {
-//!     timestamp_ns: 12360,
+//! tracer.record(EventRecord {
+//!     ts_delta_ns: 12360,
 //!     flow_id: 1,
 //!     event_type: event_type::STREAM_OPENED,
 //!     payload: 10,
@@ -59,9 +60,9 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
@@ -71,7 +72,7 @@ const MAX_EVENTS_PER_FLUSH: usize = 100_000;
 /// Binary file header (24 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
-struct FileHeader {
+pub struct FileHeader {
     magic: [u8; 4],      // b"ojo\0"
     version: u8,         // 1
     reserved: [u8; 3],   // [0, 0, 0]
@@ -92,65 +93,83 @@ impl FileHeader {
 }
 
 /// Binary event record (32 bytes)
+/// This is the record format for both the API and on-disk storage
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
-struct EventRecord {
-    ts_delta_ns: u64, // Time delta from batch_start_ns
-    flow_id: u64,
-    event_type: u64,
-    payload: u64,
+pub struct EventRecord {
+    pub ts_delta_ns: u64, // Time delta from batch_start_ns
+    pub flow_id: u64,
+    pub event_type: u64,
+    pub payload: u64,
 }
 
 /// Lock-free ring buffer for event storage
 struct RingBuffer {
-    buffer: Arc<Box<[u8]>>,
+    buffer: *mut EventRecord,
     write_head: AtomicUsize,
     read_head: AtomicUsize,
     dropped_count: AtomicU64,
-    capacity: usize,
+    capacity: usize,      // Number of records (must be power of 2)
+    capacity_mask: usize, // capacity - 1, for fast modulo
 }
 
+unsafe impl Send for RingBuffer {}
+unsafe impl Sync for RingBuffer {}
+
 impl RingBuffer {
-    fn new(capacity: usize) -> Self {
-        // Allocate buffer without unnecessary initialization
-        let buffer = vec![0u8; capacity].into_boxed_slice();
+    fn new(capacity_bytes: usize) -> Self {
+        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
+        
+        // Calculate capacity in records
+        let mut capacity = capacity_bytes / RECORD_SIZE;
+        
+        // Ensure capacity is at least 64 records
+        if capacity < 64 {
+            capacity = 64;
+        }
+        
+        // Round up to next power of two
+        capacity = capacity.next_power_of_two();
+        
+        let capacity_mask = capacity - 1;
+        
+        // Allocate buffer
+        let layout = std::alloc::Layout::array::<EventRecord>(capacity).unwrap();
+        let buffer = unsafe { std::alloc::alloc(layout) as *mut EventRecord };
+        
+        if buffer.is_null() {
+            panic!("Failed to allocate ring buffer");
+        }
+        
         Self {
-            buffer: Arc::new(buffer),
+            buffer,
             write_head: AtomicUsize::new(0),
             read_head: AtomicUsize::new(0),
             dropped_count: AtomicU64::new(0),
             capacity,
+            capacity_mask,
         }
     }
 
     /// Try to write an event record to the ring buffer
     /// Returns true if successful, false if buffer is full
     fn write(&self, record: &EventRecord) -> bool {
-        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-        
         loop {
             let write_pos = self.write_head.load(Ordering::Acquire);
             let read_pos = self.read_head.load(Ordering::Acquire);
             
-            // Calculate used space
-            let used = if write_pos >= read_pos {
-                write_pos - read_pos
-            } else {
-                self.capacity - read_pos + write_pos
-            };
+            // Calculate used space (in records)
+            let used = write_pos.wrapping_sub(read_pos);
             
-            // Calculate available space (leave one record space as buffer to distinguish full from empty)
-            let available = self.capacity - used;
-            
-            // Check if there's enough space (need RECORD_SIZE + extra to avoid confusion with empty buffer)
-            if available <= RECORD_SIZE {
+            // Check if there's enough space (leave one slot to distinguish full from empty)
+            if used >= self.capacity - 1 {
                 // Buffer full, drop event
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
             
             // Try to reserve space using CAS
-            let new_write_pos = (write_pos + RECORD_SIZE) % self.capacity;
+            let new_write_pos = write_pos.wrapping_add(1);
             if self
                 .write_head
                 .compare_exchange(
@@ -159,104 +178,67 @@ impl RingBuffer {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 )
-                .is_ok()
+                .is_err()
             {
-                // Successfully reserved space, now write the data
-                let bytes = record.as_bytes();
-                let buffer_ptr = self.buffer.as_ptr() as *mut u8;
-                
-                // Handle wrap-around
-                let end = write_pos + RECORD_SIZE;
-                if end <= self.capacity {
-                    // No wrap-around
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            buffer_ptr.add(write_pos),
-                            RECORD_SIZE,
-                        );
-                    }
-                } else {
-                    // Wrap-around case
-                    let first_part = self.capacity - write_pos;
-                    let second_part = RECORD_SIZE - first_part;
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            bytes.as_ptr(),
-                            buffer_ptr.add(write_pos),
-                            first_part,
-                        );
-                        std::ptr::copy_nonoverlapping(
-                            bytes.as_ptr().add(first_part),
-                            buffer_ptr,
-                            second_part,
-                        );
-                    }
-                }
-                
-                // Release fence to ensure visibility
-                std::sync::atomic::fence(Ordering::Release);
-                return true;
+                // CAS failed, retry
+                continue;
             }
-            // CAS failed, retry
+            
+            // Successfully reserved space, write the data
+            let index = write_pos & self.capacity_mask;
+            unsafe {
+                std::ptr::write(self.buffer.add(index), *record);
+            }
+            
+            // Release fence to ensure visibility
+            std::sync::atomic::fence(Ordering::Release);
+            return true;
         }
     }
 
-    /// Read available events from the ring buffer
-    fn read(&self, max_events: usize) -> Vec<EventRecord> {
-        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-        
-        let mut events = Vec::new();
+    /// Read available events from the ring buffer using a callback
+    /// The callback receives two slices: head and tail (tail may be empty)
+    fn read<F>(&self, max_events: usize, mut callback: F)
+    where
+        F: FnMut(&[EventRecord]),
+    {
         let write_pos = self.write_head.load(Ordering::Acquire);
-        let mut read_pos = self.read_head.load(Ordering::Acquire);
+        let read_pos = self.read_head.load(Ordering::Acquire);
         
-        while events.len() < max_events {
-            if read_pos == write_pos {
-                break; // No more data available
-            }
-            
-            let mut record = EventRecord::new_zeroed();
-            let bytes = record.as_bytes_mut();
-            
-            // Handle wrap-around
-            let end = read_pos + RECORD_SIZE;
-            if end <= self.capacity {
-                // No wrap-around
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        self.buffer.as_ptr().add(read_pos),
-                        bytes.as_mut_ptr(),
-                        RECORD_SIZE,
-                    );
-                }
+        // Calculate available records
+        let available = write_pos.wrapping_sub(read_pos);
+        let to_read = available.min(max_events);
+        
+        if to_read == 0 {
+            return;
+        }
+        
+        // Create slice from buffer (no wrap-around with masking)
+        let start_index = read_pos & self.capacity_mask;
+        let end_index = (read_pos + to_read) & self.capacity_mask;
+        
+        unsafe {
+            if end_index > start_index || end_index == 0 {
+                // Contiguous read (or exactly at boundary)
+                let slice = std::slice::from_raw_parts(self.buffer.add(start_index), to_read);
+                callback(slice);
             } else {
-                // Wrap-around case
-                let first_part = self.capacity - read_pos;
-                let second_part = RECORD_SIZE - first_part;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        self.buffer.as_ptr().add(read_pos),
-                        bytes.as_mut_ptr(),
-                        first_part,
-                    );
-                    std::ptr::copy_nonoverlapping(
-                        self.buffer.as_ptr(),
-                        bytes.as_mut_ptr().add(first_part),
-                        second_part,
-                    );
+                // Split read (wrapped around)
+                let first_part = self.capacity - start_index;
+                let second_part = to_read - first_part;
+                
+                let first_slice = std::slice::from_raw_parts(self.buffer.add(start_index), first_part);
+                callback(first_slice);
+                
+                if second_part > 0 {
+                    let second_slice = std::slice::from_raw_parts(self.buffer, second_part);
+                    callback(second_slice);
                 }
             }
-            
-            events.push(record);
-            read_pos = (read_pos + RECORD_SIZE) % self.capacity;
         }
         
         // Update read head
-        if !events.is_empty() {
-            self.read_head.store(read_pos, Ordering::Release);
-        }
-        
-        events
+        self.read_head.store(read_pos + to_read, Ordering::Release);
     }
 
     /// Get and reset the dropped event count
@@ -265,14 +247,21 @@ impl RingBuffer {
     }
 }
 
+impl Drop for RingBuffer {
+    fn drop(&mut self) {
+        let layout = std::alloc::Layout::array::<EventRecord>(self.capacity).unwrap();
+        unsafe {
+            std::alloc::dealloc(self.buffer as *mut u8, layout);
+        }
+    }
+}
+
 /// Shared state between tracer and flusher thread
 struct SharedState {
-    ring_buffer: Arc<RingBuffer>,
+    ring_buffer: RingBuffer,
     batch_start_ns: u64,
     staging_dir: PathBuf,
     output_dir: PathBuf,
-    shutdown: AtomicBool,
-    flush_signal: Arc<(Mutex<bool>, Condvar)>,
 }
 
 /// Configuration for the tracer
@@ -284,8 +273,8 @@ pub struct TracerConfig {
     /// Size of the ring buffer in bytes (default: 512 MiB)
     pub buffer_size: usize,
 
-    /// Flush interval in milliseconds (default: 1000ms)
-    pub flush_interval_ms: u64,
+    /// Flush interval (default: 1 second)
+    pub flush_interval: Duration,
 }
 
 impl Default for TracerConfig {
@@ -293,7 +282,7 @@ impl Default for TracerConfig {
         Self {
             output_dir: PathBuf::from("./traces"),
             buffer_size: 512 * 1024 * 1024, // 512 MiB
-            flush_interval_ms: 1000,        // 1 second
+            flush_interval: Duration::from_secs(1),
         }
     }
 }
@@ -319,30 +308,16 @@ impl TracerConfig {
         self
     }
 
-    /// Set the flush interval in milliseconds
-    pub fn with_flush_interval_ms(mut self, interval: u64) -> Self {
-        self.flush_interval_ms = interval;
+    /// Set the flush interval
+    pub fn with_flush_interval(mut self, interval: Duration) -> Self {
+        self.flush_interval = interval;
         self
     }
-}
-
-/// Trace event structure
-#[derive(Debug, Clone, Copy)]
-pub struct Event {
-    /// Timestamp in nanoseconds since tracer start
-    pub timestamp_ns: u64,
-    /// Flow identifier (unique per batch)
-    pub flow_id: u64,
-    /// Event type identifier
-    pub event_type: u64,
-    /// Event payload
-    pub payload: u64,
 }
 
 /// Main tracer handle for recording events
 pub struct Tracer {
     shared_state: Arc<SharedState>,
-    flusher_thread: Option<JoinHandle<()>>,
 }
 
 impl Tracer {
@@ -358,7 +333,7 @@ impl Tracer {
         fs::create_dir_all(&output_dir)?;
 
         // Initialize ring buffer
-        let ring_buffer = Arc::new(RingBuffer::new(config.buffer_size));
+        let ring_buffer = RingBuffer::new(config.buffer_size);
 
         // Get batch start timestamp
         let batch_start_ns = SystemTime::now()
@@ -368,25 +343,20 @@ impl Tracer {
 
         // Create shared state
         let shared_state = Arc::new(SharedState {
-            ring_buffer: ring_buffer.clone(),
+            ring_buffer,
             batch_start_ns,
             staging_dir,
             output_dir,
-            shutdown: AtomicBool::new(false),
-            flush_signal: Arc::new((Mutex::new(false), Condvar::new())),
         });
 
         // Start flusher thread
         let flusher_state = shared_state.clone();
-        let flush_interval = Duration::from_millis(config.flush_interval_ms);
-        let flusher_thread = thread::spawn(move || {
+        let flush_interval = config.flush_interval;
+        thread::spawn(move || {
             flusher_thread_main(flusher_state, flush_interval);
         });
 
-        Ok(Self {
-            shared_state,
-            flusher_thread: Some(flusher_thread),
-        })
+        Ok(Self { shared_state })
     }
 
     /// Record a trace event
@@ -397,52 +367,20 @@ impl Tracer {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use ojo_client::{Tracer, Event, event_type};
+    /// use ojo_client::{Tracer, EventRecord, event_type};
     /// # let tracer = Tracer::new(Default::default()).unwrap();
     ///
-    /// let event = Event {
-    ///     timestamp_ns: 12345, // Get from monotonic clock
+    /// let event = EventRecord {
+    ///     ts_delta_ns: 12345, // Time delta from batch start
     ///     flow_id: 1,
     ///     event_type: event_type::PACKET_SENT,
     ///     payload: 100, // packet number
     /// };
     /// tracer.record(event);
     /// ```
-    pub fn record(&self, event: Event) {
-        // Convert Event to EventRecord with timestamp delta
-        let ts_delta_ns = event
-            .timestamp_ns
-            .saturating_sub(self.shared_state.batch_start_ns);
-
-        let record = EventRecord {
-            ts_delta_ns,
-            flow_id: event.flow_id,
-            event_type: event.event_type,
-            payload: event.payload,
-        };
-
+    pub fn record(&self, record: EventRecord) {
         // Write to ring buffer (lock-free)
         self.shared_state.ring_buffer.write(&record);
-    }
-}
-
-impl Drop for Tracer {
-    fn drop(&mut self) {
-        // Signal flusher thread to stop
-        self.shared_state.shutdown.store(true, Ordering::Release);
-
-        // Wake up flusher thread
-        let (lock, cvar) = &*self.shared_state.flush_signal;
-        {
-            let mut signaled = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            *signaled = true;
-        }
-        cvar.notify_one();
-
-        // Wait for flusher thread to finish
-        if let Some(handle) = self.flusher_thread.take() {
-            let _ = handle.join();
-        }
     }
 }
 
@@ -451,40 +389,41 @@ fn flusher_thread_main(state: Arc<SharedState>, flush_interval: Duration) {
     let mut batch_counter = 0u64;
 
     loop {
-        // Wait for flush interval or shutdown signal
-        let (lock, cvar) = &*state.flush_signal;
-        let lock_result = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let wait_result = cvar.wait_timeout_while(
-            lock_result,
-            flush_interval,
-            |&mut signaled| !signaled && !state.shutdown.load(Ordering::Acquire),
-        );
-        
-        // Handle potential error from wait_timeout
-        if wait_result.is_err() {
-            // If wait failed, we should still continue to flush and check shutdown
-            eprintln!("Warning: Condition variable wait failed, continuing with flush");
+        // Sleep for flush interval
+        thread::sleep(flush_interval);
+
+        // Check if we're the last reference (tracer dropped)
+        if Arc::strong_count(&state) == 1 {
+            // Do final flush and exit
+            let mut events_to_write = Vec::new();
+            state.ring_buffer.read(MAX_EVENTS_PER_FLUSH, |slice| {
+                events_to_write.extend_from_slice(slice);
+            });
+            
+            let dropped = state.ring_buffer.take_dropped_count();
+            
+            if !events_to_write.is_empty() || dropped > 0 {
+                if let Err(e) = flush_events_to_file(&state, &events_to_write, dropped, &mut batch_counter) {
+                    eprintln!("Error flushing events to file: {}", e);
+                }
+            }
+            break;
         }
 
-        // Check if we should shutdown
-        let should_shutdown = state.shutdown.load(Ordering::Acquire);
-
         // Read events from ring buffer
-        let events = state.ring_buffer.read(MAX_EVENTS_PER_FLUSH);
+        let mut events_to_write = Vec::new();
+        state.ring_buffer.read(MAX_EVENTS_PER_FLUSH, |slice| {
+            events_to_write.extend_from_slice(slice);
+        });
 
         // Check for dropped events
         let dropped = state.ring_buffer.take_dropped_count();
 
         // Only write a file if we have events or dropped count
-        if !events.is_empty() || dropped > 0 {
-            if let Err(e) = flush_events_to_file(&state, &events, dropped, &mut batch_counter) {
+        if !events_to_write.is_empty() || dropped > 0 {
+            if let Err(e) = flush_events_to_file(&state, &events_to_write, dropped, &mut batch_counter) {
                 eprintln!("Error flushing events to file: {}", e);
             }
-        }
-
-        // Exit if shutdown was requested
-        if should_shutdown {
-            break;
         }
     }
 }
@@ -510,9 +449,15 @@ fn flush_events_to_file(
     let header = FileHeader::new(state.batch_start_ns);
     file.write_all(header.as_bytes())?;
 
-    // Write events
-    for event in events {
-        file.write_all(event.as_bytes())?;
+    // Write events as raw bytes
+    if !events.is_empty() {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                events.as_ptr() as *const u8,
+                events.len() * std::mem::size_of::<EventRecord>(),
+            )
+        };
+        file.write_all(bytes)?;
     }
 
     // Write dropped events record if any
@@ -564,7 +509,7 @@ mod tests {
     fn test_config_default() {
         let config = TracerConfig::default();
         assert_eq!(config.buffer_size, 512 * 1024 * 1024);
-        assert_eq!(config.flush_interval_ms, 1000);
+        assert_eq!(config.flush_interval, Duration::from_secs(1));
     }
 
     #[test]
@@ -572,11 +517,11 @@ mod tests {
         let config = TracerConfig::default()
             .with_output_dir("/tmp/traces")
             .with_buffer_size(1024 * 1024)
-            .with_flush_interval_ms(500);
+            .with_flush_interval(Duration::from_millis(500));
 
         assert_eq!(config.output_dir, PathBuf::from("/tmp/traces"));
         assert_eq!(config.buffer_size, 1024 * 1024);
-        assert_eq!(config.flush_interval_ms, 500);
+        assert_eq!(config.flush_interval, Duration::from_millis(500));
     }
 
     #[test]
@@ -601,19 +546,14 @@ mod tests {
         let config = TracerConfig::default()
             .with_output_dir(temp_dir.path())
             .with_buffer_size(1024 * 1024)
-            .with_flush_interval_ms(100); // Fast flush for testing
-
-        let batch_start = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+            .with_flush_interval(Duration::from_millis(100));
 
         let tracer = Tracer::new(config).unwrap();
 
         // Record some events
         for i in 0..10 {
-            tracer.record(Event {
-                timestamp_ns: batch_start + i * 1000,
+            tracer.record(EventRecord {
+                ts_delta_ns: i * 1000,
                 flow_id: 1,
                 event_type: event_type::PACKET_SENT,
                 payload: i,
@@ -640,7 +580,7 @@ mod tests {
 
     #[test]
     fn test_ring_buffer_write_and_read() {
-        let buffer = RingBuffer::new(1024);
+        let buffer = RingBuffer::new(1024 * 1024);
 
         // Write some events
         for i in 0..10 {
@@ -653,8 +593,11 @@ mod tests {
             assert!(buffer.write(&record));
         }
 
-        // Read events back
-        let events = buffer.read(10);
+        // Read events back using callback
+        let mut events = Vec::new();
+        buffer.read(10, |slice| {
+            events.extend_from_slice(slice);
+        });
         assert_eq!(events.len(), 10);
 
         // Verify event data
@@ -668,12 +611,13 @@ mod tests {
 
     #[test]
     fn test_ring_buffer_overflow() {
-        // Create a small buffer that can only hold a few events
+        // Create a small buffer
         const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-        let buffer = RingBuffer::new(RECORD_SIZE * 5);
+        let buffer = RingBuffer::new(RECORD_SIZE * 10);
 
-        // Fill the buffer (we can write 4 records before it's full, leaving space to distinguish full from empty)
-        for i in 0..4 {
+        // The buffer will hold at least 64 records (minimum), so fill more
+        let capacity = 63; // Leave one slot
+        for i in 0..capacity {
             let record = EventRecord {
                 ts_delta_ns: i,
                 flow_id: 1,
@@ -696,8 +640,11 @@ mod tests {
         assert_eq!(buffer.take_dropped_count(), 1);
         
         // Read some events to make space
-        let events = buffer.read(2);
-        assert_eq!(events.len(), 2);
+        let mut read_count = 0;
+        buffer.read(10, |slice| {
+            read_count += slice.len();
+        });
+        assert_eq!(read_count, 10);
         
         // Now we should be able to write again
         let record = EventRecord {
@@ -732,34 +679,29 @@ mod tests {
         let config = TracerConfig::default()
             .with_output_dir(temp_dir.path())
             .with_buffer_size(1024 * 1024)
-            .with_flush_interval_ms(100);
-
-        let batch_start = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+            .with_flush_interval(Duration::from_millis(100));
 
         let tracer = Tracer::new(config).unwrap();
 
         // Simulate a packet lifecycle
         let flow_id = 42;
         
-        tracer.record(Event {
-            timestamp_ns: batch_start,
+        tracer.record(EventRecord {
+            ts_delta_ns: 0,
             flow_id,
             event_type: event_type::PACKET_CREATED,
             payload: 1,
         });
 
-        tracer.record(Event {
-            timestamp_ns: batch_start + 1000,
+        tracer.record(EventRecord {
+            ts_delta_ns: 1000,
             flow_id,
             event_type: event_type::PACKET_SENT,
             payload: 1,
         });
 
-        tracer.record(Event {
-            timestamp_ns: batch_start + 2000,
+        tracer.record(EventRecord {
+            ts_delta_ns: 2000,
             flow_id,
             event_type: event_type::PACKET_ACKED,
             payload: 1,
@@ -777,12 +719,7 @@ mod tests {
         let config = TracerConfig::default()
             .with_output_dir(temp_dir.path())
             .with_buffer_size(10 * 1024 * 1024)
-            .with_flush_interval_ms(200);
-
-        let batch_start = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as u64;
+            .with_flush_interval(Duration::from_millis(200));
 
         let tracer = Arc::new(Tracer::new(config).unwrap());
 
@@ -792,8 +729,8 @@ mod tests {
             let tracer_clone = tracer.clone();
             let handle = thread::spawn(move || {
                 for i in 0..100 {
-                    tracer_clone.record(Event {
-                        timestamp_ns: batch_start + i * 1000,
+                    tracer_clone.record(EventRecord {
+                        ts_delta_ns: i * 1000,
                         flow_id: thread_id,
                         event_type: event_type::PACKET_SENT,
                         payload: i,
