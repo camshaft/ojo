@@ -2,6 +2,7 @@
 members = [
     "crates/ojo-client",
     "crates/ojo",
+    "examples/simple",
 ]
 resolver = "2"
 
