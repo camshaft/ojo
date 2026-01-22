@@ -3,6 +3,9 @@ members = [
     "crates/ojo-client",
     "crates/ojo",
 ]
+exclude = [
+    "examples/simple",
+]
 resolver = "2"
 
 [workspace.package]
