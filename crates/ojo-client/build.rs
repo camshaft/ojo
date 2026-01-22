@@ -8,6 +8,9 @@ fn main() {
     let dest_path = Path::new(&out_dir).join("event_types.rs");
     let mut f = File::create(&dest_path).unwrap();
 
+    // Schema version - increment when changing event types
+    let schema_version: u64 = 1;
+
     // Define event types with their metadata
     let events = [
         // Packet events (0x00000001 - 0x000000FF)
@@ -110,6 +113,9 @@ fn main() {
         }
     }
 
+    // Generate JSON schema file
+    let schema_json = generate_schema_json(&out_dir, schema_version, &events);
+
     // Generate the module
     writeln!(f, "/// Event type constants").unwrap();
     writeln!(f, "///").unwrap();
@@ -121,6 +127,16 @@ fn main() {
     writeln!(f, "/// and provide reflection capabilities.").unwrap();
     writeln!(f, "pub mod event_type {{").unwrap();
     writeln!(f, "    use super::EventTypeInfo;").unwrap();
+    writeln!(f).unwrap();
+    
+    // Add schema version constant
+    writeln!(f, "    /// Schema version for event types").unwrap();
+    writeln!(f, "    pub const SCHEMA_VERSION: u64 = {};", schema_version).unwrap();
+    writeln!(f).unwrap();
+    
+    // Add schema JSON constant
+    writeln!(f, "    /// Event schema JSON").unwrap();
+    writeln!(f, "    pub const SCHEMA_JSON: &str = r###\"{}\"###;", schema_json).unwrap();
     writeln!(f).unwrap();
 
     // Generate constants
@@ -145,4 +161,40 @@ fn main() {
     writeln!(f, "}}").unwrap();
 
     println!("cargo:rerun-if-changed=build.rs");
+}
+
+fn generate_schema_json(
+    out_dir: &str,
+    schema_version: u64,
+    events: &[(u64, &str, &str, &str)],
+) -> String {
+    let schema_path = Path::new(out_dir).join("event_schema.json");
+
+    // Create JSON schema structure
+    let mut schema_json = String::new();
+    schema_json.push_str("{\n");
+    schema_json.push_str(&format!("  \"schema_version\": {},\n", schema_version));
+    schema_json.push_str("  \"events\": [\n");
+
+    for (i, (value, name, category, description)) in events.iter().enumerate() {
+        schema_json.push_str("    {\n");
+        schema_json.push_str(&format!("      \"value\": {},\n", value));
+        schema_json.push_str(&format!("      \"name\": \"{}\",\n", name));
+        schema_json.push_str(&format!("      \"category\": \"{}\",\n", category));
+        schema_json.push_str(&format!("      \"description\": \"{}\"\n", description));
+        if i < events.len() - 1 {
+            schema_json.push_str("    },\n");
+        } else {
+            schema_json.push_str("    }\n");
+        }
+    }
+
+    schema_json.push_str("  ]\n");
+    schema_json.push_str("}\n");
+
+    // Write to file
+    let mut schema_file = File::create(&schema_path).unwrap();
+    write!(schema_file, "{}", schema_json).unwrap();
+
+    schema_json
 }
