@@ -160,8 +160,14 @@ Offset | Size | Field           | Value/Type
 4      | 1    | version         | 1
 5      | 3    | reserved        | [0,0,0]
 8      | 8    | batch_start_ns  | u64
-16     | 8    | reserved        | 0
+16     | 8    | schema_version  | u64
 ```
+
+The `schema_version` field references the event schema version. The corresponding 
+schema file `event_schema_v{schema_version}.json` is written to the output directory
+alongside the batch files. This schema file contains event type definitions with names,
+categories, and descriptions, allowing the event types to evolve independently from the
+binary format.
 
 ### Event Record (32 bytes)
 
@@ -237,11 +243,31 @@ Offset | Size | Field           | Type
 
 ## Extension Points
 
+### Event Schema Evolution
+
+Event types are now defined in a versioned JSON schema file rather than hardcoded.
+The schema file (`event_schema_v{version}.json`) is written to the output directory
+alongside batch files and contains:
+
+- `schema_version`: Version number for the schema
+- `events`: Array of event type definitions with:
+  - `value`: Numeric event type value
+  - `name`: Constant name (e.g., "PACKET_SENT")
+  - `category`: Category (e.g., "Packet", "Stream", "FlowControl")
+  - `description`: Human-readable description
+
+To add new event types:
+1. Update `build.rs` in `ojo-client` to add new event definitions
+2. Increment the schema version
+3. Rebuild the client library
+4. New schema file will be automatically generated and written
+
 ### Custom Event Types
 
-- Define new event_type constants
-- Update event_types table
-- No code changes required in client
+- Define new event_type constants in build.rs
+- Update schema version when making changes
+- The schema file enables tooling to understand event types without code changes
+- No code changes required in tracer core logic
 
 ### Alternative Storage Backends
 

@@ -70,21 +70,21 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
 pub struct FileHeader {
-    magic: [u8; 4],      // b"ojo\0"
-    version: u8,         // 1
-    reserved: [u8; 3],   // [0, 0, 0]
-    batch_start_ns: u64, // Unix timestamp in nanoseconds
-    _reserved2: u64,     // 0
+    magic: [u8; 4],         // b"ojo\0"
+    version: u8,            // 1
+    reserved: [u8; 3],      // [0, 0, 0]
+    batch_start_ns: u64,    // Unix timestamp in nanoseconds
+    schema_version: u64,    // Schema version for event types
 }
 
 impl FileHeader {
-    fn new(batch_start_ns: u64) -> Self {
+    fn new(batch_start_ns: u64, schema_version: u64) -> Self {
         Self {
             magic: *b"ojo\0",
             version: 1,
             reserved: [0, 0, 0],
             batch_start_ns,
-            _reserved2: 0,
+            schema_version,
         }
     }
 }
@@ -328,6 +328,9 @@ impl Tracer {
         fs::create_dir_all(&staging_dir)?;
         fs::create_dir_all(&output_dir)?;
 
+        // Write schema file to output directory
+        write_schema_file(&output_dir)?;
+
         // Initialize ring buffer
         let ring_buffer = RingBuffer::new(config.buffer_size);
 
@@ -378,6 +381,22 @@ impl Tracer {
         // Write to ring buffer (lock-free)
         self.shared_state.ring_buffer.write(&record);
     }
+}
+
+/// Write the event schema JSON file to the output directory
+fn write_schema_file(output_dir: &std::path::Path) -> io::Result<()> {
+    let schema_filename = format!("event_schema_v{}.json", event_type::SCHEMA_VERSION);
+    let schema_path = output_dir.join(schema_filename);
+    
+    // Only write if the file doesn't already exist
+    if !schema_path.exists() {
+        let schema_json = event_type::SCHEMA_JSON;
+        let mut file = File::create(&schema_path)?;
+        file.write_all(schema_json.as_bytes())?;
+        file.sync_all()?;
+    }
+    
+    Ok(())
 }
 
 /// Background flusher thread main function
@@ -431,8 +450,8 @@ fn flush_events_from_ring_buffer(
     // Write to staging file
     let mut file = File::create(&staging_path)?;
 
-    // Write header
-    let header = FileHeader::new(state.batch_start_ns);
+    // Write header with schema version
+    let header = FileHeader::new(state.batch_start_ns, event_type::SCHEMA_VERSION);
     file.write_all(header.as_bytes())?;
 
     // Write events directly from ring buffer using callback
@@ -441,7 +460,7 @@ fn flush_events_from_ring_buffer(
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 slice.as_ptr() as *const u8,
-                slice.len() * std::mem::size_of::<EventRecord>(),
+                std::mem::size_of_val(slice),
             )
         };
         if let Err(e) = file.write_all(bytes) {
@@ -648,11 +667,13 @@ mod tests {
     #[test]
     fn test_file_header_format() {
         let batch_start = 123456789u64;
-        let header = FileHeader::new(batch_start);
+        let schema_version = 1u64;
+        let header = FileHeader::new(batch_start, schema_version);
 
         assert_eq!(&header.magic, b"ojo\0");
         assert_eq!(header.version, 1);
         assert_eq!(header.batch_start_ns, batch_start);
+        assert_eq!(header.schema_version, schema_version);
     }
 
     #[test]
@@ -736,6 +757,35 @@ mod tests {
 
         // Wait for flush
         thread::sleep(Duration::from_millis(500));
+
+        drop(tracer);
+    }
+
+    #[test]
+    fn test_schema_file_creation() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = TracerConfig::default()
+            .with_output_dir(temp_dir.path())
+            .with_buffer_size(1024 * 1024);
+
+        let tracer = Tracer::new(config).unwrap();
+
+        // Check that schema file was created in output directory
+        let output_dir = temp_dir.path().join("output");
+        let schema_filename = format!("event_schema_v{}.json", event_type::SCHEMA_VERSION);
+        let schema_path = output_dir.join(schema_filename);
+        
+        assert!(
+            schema_path.exists(),
+            "Schema file should be created at {:?}",
+            schema_path
+        );
+
+        // Verify schema file content is valid JSON
+        let schema_content = fs::read_to_string(&schema_path).unwrap();
+        assert!(schema_content.contains("schema_version"));
+        assert!(schema_content.contains("events"));
+        assert!(schema_content.contains("PACKET_SENT"));
 
         drop(tracer);
     }

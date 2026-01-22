@@ -83,6 +83,8 @@ Ojo supports several types of event tracking:
 - **Flow Control**: Connection and stream-level max data updates
 - **Congestion Control**: CWND, ssthresh, loss detection state
 
+Event types are defined in a versioned JSON schema file (`event_schema_v{version}.json`) that is automatically generated and written to the output directory alongside trace files. This schema includes event names, categories, and descriptions, allowing event types to evolve independently from the binary format.
+
 ## Documentation
 
 - API Documentation - Run `cargo doc --open`
