@@ -26,3 +26,9 @@ traces/
 *.db
 *.db-shm
 *.db-wal
+
+node_modules/
+
+# Assets
+crates/ojo/static/assets/*
+crates/ojo/static/index.html

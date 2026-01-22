@@ -12,6 +12,7 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, Notify, mpsc::UnboundedSender};
+use tower_http::services::ServeDir;
 use tracing::{error, info};
 
 struct AppState {
@@ -35,6 +36,11 @@ pub async fn serve(
     let app = Router::new()
         .route("/", get(index_handler))
         .route("/ws", get(ws_handler))
+        .nest_service(
+            "/assets",
+            ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/static/assets")),
+        )
+        .fallback(get(index_handler))
         .with_state(state);
 
     let addr = format!("{}:{}", host, port);
@@ -46,6 +52,14 @@ pub async fn serve(
     Ok(())
 }
 
+#[cfg(debug_assertions)]
+async fn index_handler() -> Html<String> {
+    Html(
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/static/index.html")).unwrap(),
+    )
+}
+
+#[cfg(not(debug_assertions))]
 async fn index_handler() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
 }
@@ -58,6 +72,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 #[serde(rename_all = "snake_case", tag = "type", content = "query")]
 enum ClientMessage {
     Subscribe(Query),
+    Unsubscribe(Query),
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
@@ -177,6 +192,10 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                                     });
                                 }
                             }
+                        }
+                        Some(ClientMessage::Unsubscribe(query)) => {
+                            info!("Client unsubscribed from {:?}", query);
+                            active_queries.remove(&query);
                         }
                         None => break,
                     }
