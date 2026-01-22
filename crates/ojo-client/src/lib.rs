@@ -395,46 +395,36 @@ fn flusher_thread_main(state: Arc<SharedState>, flush_interval: Duration) {
         // Check if we're the last reference (tracer dropped)
         if Arc::strong_count(&state) == 1 {
             // Do final flush and exit
-            let mut events_to_write = Vec::new();
-            state.ring_buffer.read(MAX_EVENTS_PER_FLUSH, |slice| {
-                events_to_write.extend_from_slice(slice);
-            });
-            
-            let dropped = state.ring_buffer.take_dropped_count();
-            
-            if !events_to_write.is_empty() || dropped > 0 {
-                if let Err(e) = flush_events_to_file(&state, &events_to_write, dropped, &mut batch_counter) {
-                    eprintln!("Error flushing events to file: {}", e);
-                }
+            if let Err(e) = flush_events_from_ring_buffer(&state, &mut batch_counter) {
+                eprintln!("Error flushing events to file: {}", e);
             }
             break;
         }
 
-        // Read events from ring buffer
-        let mut events_to_write = Vec::new();
-        state.ring_buffer.read(MAX_EVENTS_PER_FLUSH, |slice| {
-            events_to_write.extend_from_slice(slice);
-        });
-
-        // Check for dropped events
-        let dropped = state.ring_buffer.take_dropped_count();
-
-        // Only write a file if we have events or dropped count
-        if !events_to_write.is_empty() || dropped > 0 {
-            if let Err(e) = flush_events_to_file(&state, &events_to_write, dropped, &mut batch_counter) {
-                eprintln!("Error flushing events to file: {}", e);
-            }
+        // Flush events from ring buffer
+        if let Err(e) = flush_events_from_ring_buffer(&state, &mut batch_counter) {
+            eprintln!("Error flushing events to file: {}", e);
         }
     }
 }
 
-/// Flush events to a binary file
-fn flush_events_to_file(
+/// Flush events directly from ring buffer to a binary file
+fn flush_events_from_ring_buffer(
     state: &SharedState,
-    events: &[EventRecord],
-    dropped_count: u64,
     batch_counter: &mut u64,
 ) -> io::Result<()> {
+    // Check for dropped events
+    let dropped = state.ring_buffer.take_dropped_count();
+    
+    // Check if we have any data to write
+    let write_pos = state.ring_buffer.write_head.load(Ordering::Acquire);
+    let read_pos = state.ring_buffer.read_head.load(Ordering::Acquire);
+    let available = write_pos.wrapping_sub(read_pos);
+    
+    if available == 0 && dropped == 0 {
+        return Ok(());
+    }
+    
     // Generate unique filename
     let filename = format!("trace_{:016x}_{:08x}.bin", state.batch_start_ns, *batch_counter);
     *batch_counter += 1;
@@ -449,18 +439,27 @@ fn flush_events_to_file(
     let header = FileHeader::new(state.batch_start_ns);
     file.write_all(header.as_bytes())?;
 
-    // Write events as raw bytes
-    for event in events {
-        file.write_all(event.as_bytes())?;
-    }
+    // Write events directly from ring buffer using callback
+    state.ring_buffer.read(MAX_EVENTS_PER_FLUSH, |slice| {
+        // Convert slice of EventRecords to bytes and write
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                slice.as_ptr() as *const u8,
+                slice.len() * std::mem::size_of::<EventRecord>(),
+            )
+        };
+        if let Err(e) = file.write_all(bytes) {
+            eprintln!("Error writing events to file: {}", e);
+        }
+    });
 
     // Write dropped events record if any
-    if dropped_count > 0 {
+    if dropped > 0 {
         let dropped_event = EventRecord {
             ts_delta_ns: 0,
             flow_id: 0,
             event_type: event_type::EVENTS_DROPPED,
-            payload: dropped_count,
+            payload: dropped,
         };
         file.write_all(dropped_event.as_bytes())?;
     }

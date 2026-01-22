@@ -3,8 +3,5 @@ name = "simple-example"
 version = "0.1.0"
 edition = "2021"
 
-[workspace]
-# Empty workspace to keep this out of parent workspace
-
 [dependencies]
 ojo-client = { path = "../../crates/ojo-client" }
