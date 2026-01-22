@@ -65,6 +65,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
+/// Maximum number of events to read from ring buffer per flush
+const MAX_EVENTS_PER_FLUSH: usize = 100_000;
+
 /// Binary file header (24 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
@@ -100,7 +103,7 @@ struct EventRecord {
 
 /// Lock-free ring buffer for event storage
 struct RingBuffer {
-    buffer: Arc<Vec<u8>>,
+    buffer: Arc<Box<[u8]>>,
     write_head: AtomicUsize,
     read_head: AtomicUsize,
     dropped_count: AtomicU64,
@@ -109,8 +112,8 @@ struct RingBuffer {
 
 impl RingBuffer {
     fn new(capacity: usize) -> Self {
-        let mut buffer = Vec::with_capacity(capacity);
-        buffer.resize(capacity, 0);
+        // Allocate buffer without unnecessary initialization
+        let buffer = vec![0u8; capacity].into_boxed_slice();
         Self {
             buffer: Arc::new(buffer),
             write_head: AtomicUsize::new(0),
@@ -160,8 +163,7 @@ impl RingBuffer {
             {
                 // Successfully reserved space, now write the data
                 let bytes = record.as_bytes();
-                let buffer_ptr = Arc::as_ptr(&self.buffer) as *const Vec<u8>;
-                let buffer_ref = unsafe { &*buffer_ptr };
+                let buffer_ptr = self.buffer.as_ptr() as *mut u8;
                 
                 // Handle wrap-around
                 let end = write_pos + RECORD_SIZE;
@@ -170,7 +172,7 @@ impl RingBuffer {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             bytes.as_ptr(),
-                            buffer_ref.as_ptr().add(write_pos) as *mut u8,
+                            buffer_ptr.add(write_pos),
                             RECORD_SIZE,
                         );
                     }
@@ -181,12 +183,12 @@ impl RingBuffer {
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             bytes.as_ptr(),
-                            buffer_ref.as_ptr().add(write_pos) as *mut u8,
+                            buffer_ptr.add(write_pos),
                             first_part,
                         );
                         std::ptr::copy_nonoverlapping(
                             bytes.as_ptr().add(first_part),
-                            buffer_ref.as_ptr() as *mut u8,
+                            buffer_ptr,
                             second_part,
                         );
                     }
@@ -432,7 +434,7 @@ impl Drop for Tracer {
         // Wake up flusher thread
         let (lock, cvar) = &*self.shared_state.flush_signal;
         {
-            let mut signaled = lock.lock().unwrap();
+            let mut signaled = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             *signaled = true;
         }
         cvar.notify_one();
@@ -451,19 +453,24 @@ fn flusher_thread_main(state: Arc<SharedState>, flush_interval: Duration) {
     loop {
         // Wait for flush interval or shutdown signal
         let (lock, cvar) = &*state.flush_signal;
-        let _guard = cvar
-            .wait_timeout_while(
-                lock.lock().unwrap(),
-                flush_interval,
-                |&mut signaled| !signaled && !state.shutdown.load(Ordering::Acquire),
-            )
-            .unwrap();
+        let lock_result = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let wait_result = cvar.wait_timeout_while(
+            lock_result,
+            flush_interval,
+            |&mut signaled| !signaled && !state.shutdown.load(Ordering::Acquire),
+        );
+        
+        // Handle potential error from wait_timeout
+        if wait_result.is_err() {
+            // If wait failed, we should still continue to flush and check shutdown
+            eprintln!("Warning: Condition variable wait failed, continuing with flush");
+        }
 
         // Check if we should shutdown
         let should_shutdown = state.shutdown.load(Ordering::Acquire);
 
         // Read events from ring buffer
-        let events = state.ring_buffer.read(100_000); // Read up to 100k events at a time
+        let events = state.ring_buffer.read(MAX_EVENTS_PER_FLUSH);
 
         // Check for dropped events
         let dropped = state.ring_buffer.take_dropped_count();
