@@ -1,0 +1,23 @@
+[package]
+name = "ojo-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Low-overhead transport protocol event tracing client library"
+keywords = ["tracing", "networking", "performance", "protocol", "debugging"]
+categories = ["development-tools::profiling", "network-programming"]
+
+[dependencies]
+zerocopy.workspace = true
+
+# Core dependencies for lock-free operations
+parking_lot = "0.12"
+
+# Time utilities
+once_cell = "1.19"
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.8"
