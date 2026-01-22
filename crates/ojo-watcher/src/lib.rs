@@ -13,20 +13,20 @@
 
 use std::path::PathBuf;
 
-pub use anyhow::{Result, Error};
+pub use anyhow::{Error, Result};
 
 /// Configuration for the watcher
 #[derive(Debug, Clone)]
 pub struct WatcherConfig {
     /// Directory to watch for trace files
     pub input_dir: PathBuf,
-    
+
     /// Path to the SQLite database
     pub db_path: PathBuf,
-    
+
     /// Whether to continuously watch for new files
     pub watch: bool,
-    
+
     /// Age threshold for cleaning up old trace files (in seconds)
     pub cleanup_age_secs: Option<u64>,
 }
@@ -54,18 +54,16 @@ impl Watcher {
         // - Open/create SQLite database
         // - Initialize schema
         // - Set up file system watcher if watch mode enabled
-        
-        Ok(Self {
-            _config: config,
-        })
+
+        Ok(Self { _config: config })
     }
-    
+
     /// Process all existing trace files in the input directory
     pub async fn process_existing_files(&self) -> Result<()> {
         // TODO: Scan directory and process all .bin files
         Ok(())
     }
-    
+
     /// Start watching for new trace files (blocking)
     pub async fn watch(&self) -> Result<()> {
         // TODO: Set up file watcher and process files as they appear

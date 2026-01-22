@@ -10,17 +10,17 @@
 
 use std::path::PathBuf;
 
-pub use anyhow::{Result, Error};
+pub use anyhow::{Error, Result};
 
 /// Configuration for the explorer server
 #[derive(Debug, Clone)]
 pub struct ExplorerConfig {
     /// Path to the SQLite database
     pub db_path: PathBuf,
-    
+
     /// Port to bind the web server to
     pub port: u16,
-    
+
     /// Host to bind to
     pub host: String,
 }
@@ -44,11 +44,9 @@ impl Explorer {
     /// Create a new explorer with the given configuration
     pub fn new(config: ExplorerConfig) -> Result<Self> {
         // TODO: Implement explorer initialization
-        Ok(Self {
-            _config: config,
-        })
+        Ok(Self { _config: config })
     }
-    
+
     /// Start the web server (blocking)
     pub async fn serve(&self) -> Result<()> {
         // TODO: Set up Axum server with routes
