@@ -17,21 +17,11 @@ Ojo is a low-overhead, high-performance event tracing system designed for debugg
 
 Ojo consists of two main components:
 
-```
-┌─────────────────┐     Binary Files      ┌──────────────────┐
-│   ojo-client    │ ──────────────────▶   │       ojo        │
-│  (Rust Library) │   (staging/ → output/) │ (CLI Tool)       │
-└─────────────────┘                        │                  │
-                                           │  watch: Parse    │
-                                           │  serve: Explore  │
-                                           └──────────────────┘
-```
-
 ### 1. **ojo-client** - Client Library
 Rust library for collecting and writing events to binary files with minimal overhead.
 
 ### 2. **ojo** - CLI Tool
-Combined watcher and web server:
+Combined tool with subcommands:
 - `ojo watch` - Monitors trace directories and transforms binary data into queryable database
 - `ojo serve` - Web-based interface for querying and visualizing trace data in real-time
 
@@ -90,19 +80,8 @@ Ojo supports comprehensive event tracking:
 - **Flow Control**: Connection and stream-level max data updates
 - **Congestion Control**: CWND, ssthresh, loss detection state
 
-## Binary Format
-
-Ojo uses a efficient binary format with:
-- 24-byte header (magic, version, timestamp)
-- 24-byte fixed-size event records
-- Little-endian encoding
-- Streaming-friendly design
-
-See the [Design Specification](https://gist.githubusercontent.com/camshaft/fb54b7f99677e170d5ee1588744ce339/raw/README.md) for detailed format specification.
-
 ## Documentation
 
-- [Design Specification](https://gist.githubusercontent.com/camshaft/fb54b7f99677e170d5ee1588744ce339/raw/README.md) - Binary format specification
 - API Documentation - Run `cargo doc --open`
 
 ## Use Cases

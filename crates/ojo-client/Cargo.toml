@@ -10,7 +10,6 @@ keywords = ["tracing", "networking", "performance", "protocol", "debugging"]
 categories = ["development-tools::profiling", "network-programming"]
 
 [dependencies]
-once_cell = "1.19"
 zerocopy.workspace = true
 
 [dev-dependencies]

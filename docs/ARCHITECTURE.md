@@ -42,21 +42,20 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 7. Writes batch to staging file
 8. Atomic rename to output directory
 
-### 2. ojo-watcher (Watcher Daemon)
+### 2. ojo (CLI Tool)
 
-**Purpose**: Transform binary trace files into a queryable database format.
+**Purpose**: Transform binary trace files into a queryable database format and serve web interface.
 
 **Key Components**:
 
-#### File System Watcher
-- Uses `notify` crate for efficient file watching
+#### File System Watcher (ojo watch)
 - Monitors output directory for new `.bin` files
 - Debouncing to handle file completion
 
 #### Binary Parser
 - Zero-copy deserialization with `zerocopy`
 - Validates 24-byte header (magic, version)
-- Reads 24-byte event records
+- Reads 32-byte event records
 - Detects and logs dropped events
 
 #### Database Writer
@@ -84,7 +83,7 @@ CREATE TABLE batches (
 CREATE TABLE events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     batch_id INTEGER NOT NULL,
-    ts_delta_ns INTEGER NOT NULL,
+    timestamp_ns INTEGER NOT NULL,  -- Absolute timestamp (batch_start_ns + ts_delta_ns)
     flow_id INTEGER NOT NULL,
     event_type INTEGER NOT NULL,
     payload INTEGER NOT NULL,
@@ -106,10 +105,10 @@ CREATE TABLE flows (
 CREATE INDEX idx_batch_id ON events(batch_id);
 CREATE INDEX idx_flow_id ON events(batch_id, flow_id);
 CREATE INDEX idx_event_type ON events(event_type);
-CREATE INDEX idx_timestamp ON events(ts_delta_ns);
+CREATE INDEX idx_timestamp ON events(timestamp_ns);
 ```
 
-### 3. ojo-explorer (Web Interface)
+#### Web Server (ojo serve)
 
 **Purpose**: Provide an interactive browser-based interface for querying and visualizing traces.
 
@@ -144,7 +143,7 @@ Provides endpoints for querying trace data and retrieving flow information.
 ```
 Offset | Size | Field           | Value/Type
 -------+------+-----------------+-----------
-0      | 4    | magic           | b"TRAC"
+0      | 4    | magic           | b"ojo\0"
 4      | 1    | version         | 1
 5      | 3    | reserved        | [0,0,0]
 8      | 8    | batch_start_ns  | u64
@@ -184,19 +183,13 @@ Offset | Size | Field           | Type
 3. Flush notification (condvar)
 4. Read head update after flush
 
-### ojo-watcher
+### ojo (CLI tool)
 
 **Single-threaded processing**:
 - One file at a time (no concurrent file processing)
 - Database writer in WAL mode for better concurrency
 - Can process files while client is writing new ones
-
-### ojo-explorer
-
-**Request-per-query**:
-- Each HTTP request is independent
-- Database connections from pool
-- Read-only queries (no write contention)
+- Web server: each HTTP request is independent with database connections from pool
 
 ## Failure Modes and Recovery
 

@@ -1,6 +1,6 @@
 //! # ojo
 //!
-//! CLI for the ojo tracer with watch and serve subcommands
+//! CLI for the ojo tracer
 
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -47,6 +47,22 @@ enum Commands {
     },
 }
 
+/// Configuration for the watcher
+#[derive(Debug, Clone)]
+struct WatcherConfig {
+    input_dir: PathBuf,
+    db_path: PathBuf,
+    cleanup_age_secs: Option<u64>,
+}
+
+/// Configuration for the explorer server
+#[derive(Debug, Clone)]
+struct ExplorerConfig {
+    db_path: PathBuf,
+    port: u16,
+    host: String,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
@@ -69,21 +85,15 @@ async fn main() -> anyhow::Result<()> {
             info!("  Input directory: {:?}", input_dir);
             info!("  Database path: {:?}", db_path);
 
-            let config = ojo::WatcherConfig {
+            let _config = WatcherConfig {
                 input_dir,
                 db_path,
                 cleanup_age_secs: cleanup_days.map(|d| d * 24 * 60 * 60),
             };
 
-            let watcher = ojo::Watcher::new(config)?;
-
-            // Process existing files first
+            // TODO: Implement watcher
             info!("Processing existing trace files...");
-            watcher.process_existing_files().await?;
-
-            // Continue watching
             info!("Watching for new trace files...");
-            watcher.watch().await?;
         }
 
         Commands::Serve {
@@ -95,16 +105,14 @@ async fn main() -> anyhow::Result<()> {
             info!("  Database path: {:?}", db_path);
             info!("  Binding to: {}:{}", host, port);
 
-            let config = ojo::ExplorerConfig {
+            let _config = ExplorerConfig {
                 db_path,
                 port,
                 host: host.clone(),
             };
 
-            let explorer = ojo::Explorer::new(config)?;
-
+            // TODO: Implement explorer
             info!("Server starting at http://{}:{}", host, port);
-            explorer.serve().await?;
         }
     }
 

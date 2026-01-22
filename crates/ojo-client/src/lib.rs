@@ -172,56 +172,21 @@ impl Drop for Tracer {
     }
 }
 
-/// Event type constants as defined in the specification
-pub mod event_type {
-    /// Packet created
-    pub const PACKET_CREATED: u64 = 0x00000001;
-
-    /// Packet sent
-    pub const PACKET_SENT: u64 = 0x00000002;
-
-    /// Packet acknowledged
-    pub const PACKET_ACKED: u64 = 0x00000003;
-
-    /// Packet lost due to timeout
-    pub const PACKET_LOST_TIMEOUT: u64 = 0x00000004;
-
-    /// Packet lost due to duplicate ACK
-    pub const PACKET_LOST_DUPLICATE_ACK: u64 = 0x00000005;
-
-    /// Packet retransmit (old packet number)
-    pub const PACKET_RETRANSMIT_OLD: u64 = 0x00000006;
-
-    /// Packet retransmit (new packet number)
-    pub const PACKET_RETRANSMIT_NEW: u64 = 0x00000007;
-
-    /// Stream opened
-    pub const STREAM_OPENED: u64 = 0x00000100;
-
-    /// Stream link to parent connection
-    pub const STREAM_LINK_PARENT: u64 = 0x00000101;
-
-    /// Stream FIN sent
-    pub const STREAM_FIN_SENT: u64 = 0x00000102;
-
-    /// Stream FIN acknowledged
-    pub const STREAM_FIN_ACKED: u64 = 0x00000103;
-
-    /// Connection max data update
-    pub const CONNECTION_MAX_DATA_UPDATE: u64 = 0x00000200;
-
-    /// Stream max data update
-    pub const STREAM_MAX_DATA_UPDATE: u64 = 0x00000201;
-
-    /// Congestion window updated
-    pub const CWND_UPDATED: u64 = 0x00000300;
-
-    /// Slow start threshold updated
-    pub const SSTHRESH_UPDATED: u64 = 0x00000301;
-
-    /// Events dropped due to buffer overflow
-    pub const EVENTS_DROPPED: u64 = 0x0000FF01;
+/// Metadata for an event type
+#[derive(Debug, Clone, Copy)]
+pub struct EventTypeInfo {
+    /// The event type value
+    pub value: u64,
+    /// The constant name
+    pub name: &'static str,
+    /// The category (Packet, Stream, FlowControl, CongestionControl, Meta)
+    pub category: &'static str,
+    /// Human-readable description
+    pub description: &'static str,
 }
+
+// Include generated event types
+include!(concat!(env!("OUT_DIR"), "/event_types.rs"));
 
 #[cfg(test)]
 mod tests {

@@ -32,11 +32,10 @@ cargo fmt --workspace
 
 ## Project Structure
 
-Ojo is organized as a Cargo workspace with three main crates:
+Ojo is organized as a Cargo workspace with two main crates:
 
 - **ojo-client**: Client library for event recording
-- **ojo-watcher**: Daemon for transforming binary traces to SQLite
-- **ojo-explorer**: Web server for querying and visualizing traces
+- **ojo**: CLI tool with `watch` and `serve` subcommands
 
 See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed architecture information.
 
@@ -242,19 +241,14 @@ The client library is performance-critical:
 - **Lock-free**: Use atomic operations, not mutexes
 - **Benchmark**: Always benchmark performance changes
 
-### ojo-watcher
+### ojo
 
-The watcher should be efficient but is less critical:
+The CLI tool should be efficient:
 
 - Process files in reasonable time (< 1s per 1M events)
 - Batch database inserts in transactions
 - Use indexes for query performance
-
-### ojo-explorer
-
-The explorer should be responsive:
-
-- Query response < 100ms for typical queries
+- Web server: query response < 100ms for typical queries
 - Paginate large result sets
 - Cache frequently accessed data
 
