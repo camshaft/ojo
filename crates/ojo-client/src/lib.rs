@@ -87,11 +87,11 @@ use zerocopy::{AsBytes, FromBytes, FromZeroes};
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
 pub struct FileHeader {
-    magic: [u8; 4],      // b"ojo\0"
-    version: u8,         // 1
-    reserved: [u8; 3],   // [0, 0, 0]
-    batch_start_ns: u64, // Unix timestamp in nanoseconds
-    schema_version: u64, // Schema version for event types
+    pub magic: [u8; 4],      // b"ojo\0"
+    pub version: u8,         // 1
+    pub reserved: [u8; 3],   // [0, 0, 0]
+    pub batch_start_ns: u64, // Unix timestamp in nanoseconds
+    pub schema_version: u64, // Schema version for event types
 }
 
 impl FileHeader {
@@ -333,15 +333,17 @@ impl Builder {
     pub fn build(self) -> Result<Tracer, std::io::Error> {
         // Create staging/ and output/ directories
         let staging_dir = self.output_dir.join("staging");
-        let output_dir = self.output_dir.join("output");
+        let output_dir = self.output_dir.join("raw");
+        let schema_dir = self.output_dir.join("schema");
         fs::create_dir_all(&staging_dir)?;
         fs::create_dir_all(&output_dir)?;
+        fs::create_dir_all(&schema_dir)?;
 
         // Merge schemas and generate JSON
         let (schema_version, schema_json) = self.generate_merged_schema();
 
         // Write schema file to output directory
-        write_schema_file(&output_dir, schema_version, &schema_json)?;
+        write_schema_file(&schema_dir, schema_version, &schema_json)?;
 
         // Initialize ring buffer
         let ring_buffer = RingBuffer::new(self.buffer_size);
@@ -643,7 +645,7 @@ mod tests {
 
         // Check that directories were created
         assert!(temp_dir.path().join("staging").exists());
-        assert!(temp_dir.path().join("output").exists());
+        assert!(temp_dir.path().join("raw").exists());
 
         drop(tracer);
     }
@@ -672,7 +674,7 @@ mod tests {
         thread::sleep(Duration::from_millis(300));
 
         // Check that files were created
-        let output_dir = temp_dir.path().join("output");
+        let output_dir = temp_dir.path().join("raw");
         let entries: Vec<_> = fs::read_dir(output_dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -876,7 +878,7 @@ mod tests {
             .unwrap();
 
         // Check that schema file was created in output directory
-        let output_dir = temp_dir.path().join("output");
+        let output_dir = temp_dir.path().join("raw");
 
         // Find schema file (name includes hash now)
         let entries: Vec<_> = fs::read_dir(&output_dir)

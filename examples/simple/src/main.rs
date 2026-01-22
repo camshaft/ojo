@@ -1,3 +1,4 @@
+#![allow(clippy::manual_is_multiple_of)]
 //! Simple example of using ojo-client
 //!
 //! This example demonstrates:
@@ -6,10 +7,14 @@
 //! - Recording stream events
 //! - Recording congestion control events
 //!
-//! Run with: cargo run --example simple
+//! Run with: cargo run -p simple-example
 
-use ojo_client::{Builder, EventRecord};
+use ojo_client::{Builder, EventRecord, Tracer};
 use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -18,9 +23,85 @@ mod events {
     include!(concat!(env!("OUT_DIR"), "/events.rs"));
 }
 
+static FLOW_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
+    let flow_id = FLOW_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let ts = || start_time.elapsed().as_nanos() as u64;
+
+    // Simulate a simple connection with packet exchanges
+    if flow_id % 10 == 0 {
+        println!(
+            "[Worker {}] Simulating connection (flow_id = {})...",
+            worker_id, flow_id
+        );
+    }
+
+    // Initial congestion window
+    tracer.record(EventRecord {
+        ts_delta_ns: ts(),
+        flow_id,
+        event_type: events::CWND_UPDATED,
+        payload: 10_000,
+    });
+
+    // Send some packets
+    let packet_count = 5 + (flow_id % 10); // variable packet count
+    for packet_num in 1..=packet_count {
+        tracer.record(EventRecord {
+            ts_delta_ns: ts(),
+            flow_id,
+            event_type: events::PACKET_SENT,
+            payload: packet_num,
+        });
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // Acknowledge some packets
+    for packet_num in 1..=(packet_count - 2) {
+        tracer.record(EventRecord {
+            ts_delta_ns: ts(),
+            flow_id,
+            event_type: events::PACKET_ACKED,
+            payload: packet_num,
+        });
+        thread::sleep(Duration::from_millis(2));
+    }
+
+    // Occasional packet loss
+    if flow_id % 3 == 0 {
+        let lost_packet = packet_count - 1;
+        tracer.record(EventRecord {
+            ts_delta_ns: ts(),
+            flow_id,
+            event_type: events::PACKET_LOST_TIMEOUT,
+            payload: lost_packet,
+        });
+
+        // Update congestion window after loss
+        tracer.record(EventRecord {
+            ts_delta_ns: ts(),
+            flow_id,
+            event_type: events::CWND_UPDATED,
+            payload: 5_000,
+        });
+    }
+
+    // Open a stream occasionally
+    if flow_id % 5 == 0 {
+        let stream_id = flow_id * 10;
+        tracer.record(EventRecord {
+            ts_delta_ns: ts(),
+            flow_id,
+            event_type: events::STREAM_OPENED,
+            payload: stream_id,
+        });
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Ojo Simple Example");
-    println!("==================\n");
+    println!("Ojo Continuous Simulation");
+    println!("=========================\n");
 
     let trace_dir = if let Some(dir) = std::env::args().nth(1) {
         std::path::PathBuf::from(dir)
@@ -42,104 +123,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create the tracer
     println!("Creating tracer...");
-    let tracer = config.build()?;
-    println!("Tracer initialized!\n");
-
-    let start = Instant::now();
-    let flow_id = 1;
-
-    // Helper to get timestamp delta
-    let ts = || start.elapsed().as_nanos() as u64;
-
-    // Simulate a simple connection with packet exchanges
-    println!("Simulating connection (flow_id = 1)...");
-
-    // Initial congestion window
-    tracer.record(EventRecord {
-        ts_delta_ns: ts(),
-        flow_id,
-        event_type: events::CWND_UPDATED,
-        payload: 10_000,
-    });
-
-    // Send some packets
-    for packet_num in 1..=10 {
-        println!("  Sending packet {}", packet_num);
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::PACKET_SENT,
-            payload: packet_num,
-        });
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    // Acknowledge some packets
-    for packet_num in 1..=7 {
-        println!("  Packet {} acknowledged", packet_num);
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::PACKET_ACKED,
-            payload: packet_num,
-        });
-        thread::sleep(Duration::from_millis(5));
-    }
-
-    // Packet loss
-    println!("  Packet 8 lost (timeout)");
-    tracer.record(EventRecord {
-        ts_delta_ns: ts(),
-        flow_id,
-        event_type: events::PACKET_LOST_TIMEOUT,
-        payload: 8,
-    });
-
-    // Update congestion window after loss
-    tracer.record(EventRecord {
-        ts_delta_ns: ts(),
-        flow_id,
-        event_type: events::CWND_UPDATED,
-        payload: 5_000,
-    });
-
-    // Open a stream
-    println!("\nOpening stream (flow_id = 2, stream_id = 10)...");
-    let stream_flow_id = 2;
-    let stream_id = 10;
-    tracer.record(EventRecord {
-        ts_delta_ns: ts(),
-        flow_id: stream_flow_id,
-        event_type: events::STREAM_OPENED,
-        payload: stream_id,
-    });
-
-    // Send more packets after recovery
-    for packet_num in 11..=15 {
-        println!("  Sending packet {}", packet_num);
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::PACKET_SENT,
-            payload: packet_num,
-        });
-        thread::sleep(Duration::from_millis(10));
-    }
-
-    println!("\nExample complete!");
-    println!("\nTo view these traces:");
+    let tracer = Arc::new(config.build()?);
+    println!("Tracer initialized! Starting simulation workers...\n");
+    println!("Press Ctrl+C to stop.");
+    println!("To view traces while running:");
     println!(
-        "1. Run: cargo run --bin ojo watch --input-dir {:?} --db-path /tmp/traces.db",
+        "  cargo run --bin ojo watch --input-dir {:?}",
         trace_dir.join("output")
     );
-    println!("2. Run: cargo run --bin ojo serve --db-path /tmp/traces.db");
-    println!("3. Open: http://localhost:8080\n");
 
-    // Tracer will flush on drop (via Arc strong count check)
-    drop(tracer);
+    let start_time = Instant::now();
+    let mut handles = vec![];
 
-    println!("Waiting for final flush...");
-    thread::sleep(Duration::from_secs(1));
+    // Spawn workers to generate load
+    let worker_count = 4;
+    for i in 0..worker_count {
+        let tracer = tracer.clone();
+        handles.push(thread::spawn(move || {
+            loop {
+                simulate_connection(&tracer, start_time, i);
+                // Random-ish sleep
+                let sleep_ms = 100 + (start_time.elapsed().as_millis() as u64 % 500);
+                thread::sleep(Duration::from_millis(sleep_ms));
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().unwrap();
+    }
 
     Ok(())
 }

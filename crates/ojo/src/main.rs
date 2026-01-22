@@ -3,8 +3,14 @@
 //! CLI for the ojo tracer
 
 use clap::{Parser, Subcommand};
+use duckdb::Connection;
 use std::path::PathBuf;
-use tracing::info;
+use tracing::{error, info};
+
+mod ingester;
+mod loader;
+
+use ingester::Ingester;
 
 #[derive(Parser, Debug)]
 #[command(name = "ojo")]
@@ -19,23 +25,15 @@ enum Commands {
     /// Watch trace files and transform them into queryable format (headless mode)
     Watch {
         /// Directory containing trace files to process
-        #[arg(long, default_value = "./traces/output")]
-        input_dir: PathBuf,
-
-        /// Path to the database
-        #[arg(long, default_value = "./traces.db")]
-        db_path: PathBuf,
-
-        /// Clean up trace files older than this many days
-        #[arg(long)]
-        cleanup_days: Option<u64>,
+        #[arg(long, default_value = "./traces")]
+        trace_dir: PathBuf,
     },
 
     /// Serve the web interface for exploring traces
     Serve {
-        /// Path to the database
-        #[arg(long, default_value = "./traces.db")]
-        db_path: PathBuf,
+        /// Directory containing trace files to process
+        #[arg(long, default_value = "./traces")]
+        trace_dir: PathBuf,
 
         /// Port to bind the web server to
         #[arg(long, short, default_value = "8080")]
@@ -45,24 +43,6 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
-}
-
-/// Configuration for the watcher
-#[derive(Debug, Clone)]
-#[expect(dead_code)]
-struct WatcherConfig {
-    input_dir: PathBuf,
-    db_path: PathBuf,
-    cleanup_age_secs: Option<u64>,
-}
-
-/// Configuration for the explorer server
-#[derive(Debug, Clone)]
-#[expect(dead_code)]
-struct ExplorerConfig {
-    db_path: PathBuf,
-    port: u16,
-    host: String,
 }
 
 #[tokio::main]
@@ -78,45 +58,75 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Commands::Watch {
-            input_dir,
-            db_path,
-            cleanup_days,
-        } => {
+        Commands::Watch { trace_dir } => {
             info!("Starting ojo watch mode");
-            info!("  Input directory: {:?}", input_dir);
-            info!("  Database path: {:?}", db_path);
+            info!("  Input directory: {:?}", trace_dir);
 
-            let _config = WatcherConfig {
-                input_dir,
-                db_path,
-                cleanup_age_secs: cleanup_days.map(|d| d * 24 * 60 * 60),
-            };
+            std::fs::create_dir_all(&trace_dir)?;
+            let trace_dir = trace_dir.canonicalize()?;
 
-            // TODO: Implement watcher
-            info!("Processing existing trace files...");
-            info!("Watching for new trace files...");
+            let conn = Connection::open_in_memory()?;
+            let ingester = Ingester::new(trace_dir, conn)?;
+
+            ingester_thread(ingester);
         }
 
         Commands::Serve {
-            db_path,
+            trace_dir,
             port,
             host,
         } => {
             info!("Starting ojo serve mode");
-            info!("  Database path: {:?}", db_path);
+            info!("  Trace directory: {:?}", trace_dir);
             info!("  Binding to: {}:{}", host, port);
 
-            let _config = ExplorerConfig {
-                db_path,
-                port,
-                host: host.clone(),
-            };
+            std::fs::create_dir_all(&trace_dir)?;
+            let trace_dir = trace_dir.canonicalize()?;
 
-            // TODO: Implement explorer
+            let db_path = trace_dir.join("ojo.db");
+            info!("  Database path: {:?}", db_path);
+            let db_file = tempfile::TempPath::from_path(db_path);
+
+            let ingest_input = trace_dir.clone();
+
+            let conn = Connection::open(&db_file).expect("Failed to open database connection");
+
+            let ingester_conn = conn
+                .try_clone()
+                .expect("Failed to clone database connection");
+
+            // Run ingestion in background
+            let ingester =
+                Ingester::new(ingest_input, ingester_conn).expect("Failed to create ingester");
+            std::thread::spawn(move || {
+                ingester_thread(ingester);
+            });
+
+            // TODO: Implement explorer API and web server
             info!("Server starting at http://{}:{}", host, port);
+
+            tokio::signal::ctrl_c().await?;
         }
     }
 
     Ok(())
+}
+
+fn ingester_thread(mut ingester: Ingester) {
+    let mut last_snapshot: Option<std::time::Instant> = None;
+
+    loop {
+        if let Err(e) = ingester.ingest_all() {
+            error!("Ingestion error: {}", e);
+        }
+        if last_snapshot.is_none_or(|v| v.elapsed().as_secs() >= 10) {
+            if let Err(e) = ingester.export_snapshot() {
+                error!("Snapshot error: {}", e);
+            } else {
+                last_snapshot = Some(std::time::Instant::now());
+            }
+        }
+        // TODO use `notify` crate to watch for file changes instead of polling
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
 }
