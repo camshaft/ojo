@@ -66,9 +66,6 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
-/// Maximum number of events to read from ring buffer per flush
-const MAX_EVENTS_PER_FLUSH: usize = 100_000;
-
 /// Binary file header (24 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
@@ -197,8 +194,8 @@ impl RingBuffer {
     }
 
     /// Read available events from the ring buffer using a callback
-    /// The callback receives two slices: head and tail (tail may be empty)
-    fn read<F>(&self, max_events: usize, mut callback: F)
+    /// The callback receives slices of all available events
+    fn read<F>(&self, mut callback: F)
     where
         F: FnMut(&[EventRecord]),
     {
@@ -207,25 +204,24 @@ impl RingBuffer {
         
         // Calculate available records
         let available = write_pos.wrapping_sub(read_pos);
-        let to_read = available.min(max_events);
         
-        if to_read == 0 {
+        if available == 0 {
             return;
         }
         
         // Create slice from buffer (no wrap-around with masking)
         let start_index = read_pos & self.capacity_mask;
-        let end_index = (read_pos + to_read) & self.capacity_mask;
+        let end_index = (read_pos + available) & self.capacity_mask;
         
         unsafe {
             if end_index > start_index || end_index == 0 {
                 // Contiguous read (or exactly at boundary)
-                let slice = std::slice::from_raw_parts(self.buffer.add(start_index), to_read);
+                let slice = std::slice::from_raw_parts(self.buffer.add(start_index), available);
                 callback(slice);
             } else {
                 // Split read (wrapped around)
                 let first_part = self.capacity - start_index;
-                let second_part = to_read - first_part;
+                let second_part = available - first_part;
                 
                 let first_slice = std::slice::from_raw_parts(self.buffer.add(start_index), first_part);
                 callback(first_slice);
@@ -238,7 +234,7 @@ impl RingBuffer {
         }
         
         // Update read head
-        self.read_head.store(read_pos + to_read, Ordering::Release);
+        self.read_head.store(read_pos + available, Ordering::Release);
     }
 
     /// Get and reset the dropped event count
@@ -440,7 +436,7 @@ fn flush_events_from_ring_buffer(
     file.write_all(header.as_bytes())?;
 
     // Write events directly from ring buffer using callback
-    state.ring_buffer.read(MAX_EVENTS_PER_FLUSH, |slice| {
+    state.ring_buffer.read(|slice| {
         // Convert slice of EventRecords to bytes and write
         let bytes = unsafe {
             std::slice::from_raw_parts(
@@ -588,7 +584,7 @@ mod tests {
 
         // Read events back using callback
         let mut events = Vec::new();
-        buffer.read(10, |slice| {
+        buffer.read(|slice| {
             events.extend_from_slice(slice);
         });
         assert_eq!(events.len(), 10);
@@ -634,10 +630,10 @@ mod tests {
         
         // Read some events to make space
         let mut read_count = 0;
-        buffer.read(10, |slice| {
+        buffer.read(|slice| {
             read_count += slice.len();
         });
-        assert_eq!(read_count, 10);
+        assert_eq!(read_count, 63); // All events should be read
         
         // Now we should be able to write again
         let record = EventRecord {
