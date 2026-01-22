@@ -8,29 +8,41 @@
 //!
 //! Run with: cargo run --example simple
 
-use ojo_client::{EventRecord, Tracer, TracerConfig, event_type};
-use std::thread;
-use std::time::{Duration, Instant};
+use ojo_client::{Builder, EventRecord};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+
+mod events {
+    include!(concat!(env!("OUT_DIR"), "/events.rs"));
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Ojo Simple Example");
     println!("==================\n");
 
+    let trace_dir = if let Some(dir) = std::env::args().nth(1) {
+        std::path::PathBuf::from(dir)
+    } else {
+        std::env::temp_dir().join("ojo-example")
+    };
+
     // Create a temporary directory for traces
-    let trace_dir = std::env::temp_dir().join("ojo-example");
     std::fs::create_dir_all(&trace_dir)?;
 
     println!("Trace directory: {:?}\n", trace_dir);
 
     // Configure the tracer
-    let config = TracerConfig::default()
-        .with_output_dir(&trace_dir)
-        .with_buffer_size(10 * 1024 * 1024) // 10 MiB for example
-        .with_flush_interval(Duration::from_millis(500)); // Flush every 500ms
+    let config = Builder::default()
+        .output_dir(&trace_dir)
+        .buffer_size(10 * 1024 * 1024) // 10 MiB for example
+        .flush_interval(Duration::from_millis(500)) // Flush every 500ms
+        .schema(&events::SCHEMA);
 
     // Create the tracer
     println!("Creating tracer...");
-    let tracer = Tracer::new(config)?;
+    let tracer = config.build()?;
     println!("Tracer initialized!\n");
 
     let start = Instant::now();
@@ -46,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracer.record(EventRecord {
         ts_delta_ns: ts(),
         flow_id,
-        event_type: event_type::CWND_UPDATED,
+        event_type: events::CWND_UPDATED,
         payload: 10_000,
     });
 
@@ -56,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracer.record(EventRecord {
             ts_delta_ns: ts(),
             flow_id,
-            event_type: event_type::PACKET_SENT,
+            event_type: events::PACKET_SENT,
             payload: packet_num,
         });
         thread::sleep(Duration::from_millis(10));
@@ -68,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracer.record(EventRecord {
             ts_delta_ns: ts(),
             flow_id,
-            event_type: event_type::PACKET_ACKED,
+            event_type: events::PACKET_ACKED,
             payload: packet_num,
         });
         thread::sleep(Duration::from_millis(5));
@@ -79,7 +91,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracer.record(EventRecord {
         ts_delta_ns: ts(),
         flow_id,
-        event_type: event_type::PACKET_LOST_TIMEOUT,
+        event_type: events::PACKET_LOST_TIMEOUT,
         payload: 8,
     });
 
@@ -87,7 +99,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracer.record(EventRecord {
         ts_delta_ns: ts(),
         flow_id,
-        event_type: event_type::CWND_UPDATED,
+        event_type: events::CWND_UPDATED,
         payload: 5_000,
     });
 
@@ -98,7 +110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracer.record(EventRecord {
         ts_delta_ns: ts(),
         flow_id: stream_flow_id,
-        event_type: event_type::STREAM_OPENED,
+        event_type: events::STREAM_OPENED,
         payload: stream_id,
     });
 
@@ -108,7 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracer.record(EventRecord {
             ts_delta_ns: ts(),
             flow_id,
-            event_type: event_type::PACKET_SENT,
+            event_type: events::PACKET_SENT,
             payload: packet_num,
         });
         thread::sleep(Duration::from_millis(10));

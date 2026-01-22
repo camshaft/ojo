@@ -9,46 +9,56 @@
 //!
 //! - **Lock-free**: Zero-allocation event recording with < 100ns per event
 //! - **Thread-safe**: Multi-writer, single-reader architecture
-//! - **Binary format**: Fixed 24-byte records for zero-copy parsing
+//! - **Binary format**: Fixed-sized records for zero-copy parsing
 //! - **Streaming**: No pre-known event count, suitable for long-running traces
 //!
 //! ## Example
 //!
 //! ```rust,no_run
-//! use ojo_client::{Tracer, TracerConfig, EventRecord, event_type};
+//! use ojo_client::{Tracer, Builder, EventRecord};
 //! use std::path::PathBuf;
 //! use std::time::Duration;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create a tracer configuration
-//! let config = TracerConfig {
-//!     output_dir: PathBuf::from("./traces"),
-//!     buffer_size: 512 * 1024 * 1024, // 512 MiB
-//!     flush_interval: Duration::from_secs(1),
-//! };
+//! # pub mod events {
+//! #     pub static SCHEMA: ojo_client::Schema = ojo_client::Schema {
+//! #         module: module_path!(),
+//! #         namespace: 0xDEADBEEF,
+//! #         events: &[],
+//! #     };
+//! #     pub const PACKET_SENT: u64 = 1;
+//! #     pub const PACKET_ACKED: u64 = 2;
+//! #     pub const STREAM_OPENED: u64 = 3;
+//! #     pub const PACKET_CREATED: u64 = 4;
+//! # }
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Initialize the tracer
-//! let tracer = Tracer::new(config)?;
+//! let tracer = Builder::new()
+//!     .output_dir(PathBuf::from("./traces"))
+//!     .buffer_size(512 * 1024 * 1024) // 512 MiB
+//!     .flush_interval(Duration::from_secs(1))
+//!     .schema(&events::SCHEMA)
+//!     .build()?;
 //!
 //! // Record events
 //! tracer.record(EventRecord {
 //!     ts_delta_ns: 12345,
 //!     flow_id: 1,
-//!     event_type: event_type::PACKET_SENT,
+//!     event_type: events::PACKET_SENT,
 //!     payload: 100,
 //! });
 //!
 //! tracer.record(EventRecord {
 //!     ts_delta_ns: 12350,
 //!     flow_id: 1,
-//!     event_type: event_type::PACKET_ACKED,
+//!     event_type: events::PACKET_ACKED,
 //!     payload: 100,
 //! });
 //!
 //! tracer.record(EventRecord {
 //!     ts_delta_ns: 12360,
 //!     flow_id: 1,
-//!     event_type: event_type::STREAM_OPENED,
+//!     event_type: events::STREAM_OPENED,
 //!     payload: 10,
 //! });
 //!
@@ -57,24 +67,31 @@
 //! # }
 //! ```
 
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use fnv::FnvHasher;
+use std::{
+    collections::BTreeMap,
+    fs::{self, File},
+    hash::Hasher,
+    io::{self, Write},
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
 /// Binary file header (24 bytes)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
 pub struct FileHeader {
-    magic: [u8; 4],         // b"ojo\0"
-    version: u8,            // 1
-    reserved: [u8; 3],      // [0, 0, 0]
-    batch_start_ns: u64,    // Unix timestamp in nanoseconds
-    schema_version: u64,    // Schema version for event types
+    magic: [u8; 4],      // b"ojo\0"
+    version: u8,         // 1
+    reserved: [u8; 3],   // [0, 0, 0]
+    batch_start_ns: u64, // Unix timestamp in nanoseconds
+    schema_version: u64, // Schema version for event types
 }
 
 impl FileHeader {
@@ -116,28 +133,28 @@ unsafe impl Sync for RingBuffer {}
 impl RingBuffer {
     fn new(capacity_bytes: usize) -> Self {
         const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-        
+
         // Calculate capacity in records
         let mut capacity = capacity_bytes / RECORD_SIZE;
-        
+
         // Ensure capacity is at least 64 records
         if capacity < 64 {
             capacity = 64;
         }
-        
+
         // Round up to next power of two
         capacity = capacity.next_power_of_two();
-        
+
         let capacity_mask = capacity - 1;
-        
+
         // Allocate buffer
         let layout = std::alloc::Layout::array::<EventRecord>(capacity).unwrap();
         let buffer = unsafe { std::alloc::alloc(layout) as *mut EventRecord };
-        
+
         if buffer.is_null() {
             panic!("Failed to allocate ring buffer");
         }
-        
+
         Self {
             buffer,
             write_head: AtomicUsize::new(0),
@@ -154,17 +171,17 @@ impl RingBuffer {
         loop {
             let write_pos = self.write_head.load(Ordering::Acquire);
             let read_pos = self.read_head.load(Ordering::Acquire);
-            
+
             // Calculate used space (in records)
             let used = write_pos.wrapping_sub(read_pos);
-            
+
             // Check if there's enough space (leave one slot to distinguish full from empty)
             if used >= self.capacity - 1 {
                 // Buffer full, drop event
                 self.dropped_count.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            
+
             // Try to reserve space using CAS
             let new_write_pos = write_pos.wrapping_add(1);
             if self
@@ -180,13 +197,13 @@ impl RingBuffer {
                 // CAS failed, retry
                 continue;
             }
-            
+
             // Successfully reserved space, write the data
             let index = write_pos & self.capacity_mask;
             unsafe {
                 std::ptr::write(self.buffer.add(index), *record);
             }
-            
+
             // Release fence to ensure visibility
             std::sync::atomic::fence(Ordering::Release);
             return true;
@@ -201,18 +218,18 @@ impl RingBuffer {
     {
         let write_pos = self.write_head.load(Ordering::Acquire);
         let read_pos = self.read_head.load(Ordering::Acquire);
-        
+
         // Calculate available records
         let available = write_pos.wrapping_sub(read_pos);
-        
+
         if available == 0 {
             return;
         }
-        
+
         // Create slice from buffer (no wrap-around with masking)
         let start_index = read_pos & self.capacity_mask;
         let end_index = (read_pos + available) & self.capacity_mask;
-        
+
         unsafe {
             if end_index > start_index || end_index == 0 {
                 // Contiguous read (or exactly at boundary)
@@ -222,19 +239,21 @@ impl RingBuffer {
                 // Split read (wrapped around)
                 let first_part = self.capacity - start_index;
                 let second_part = available - first_part;
-                
-                let first_slice = std::slice::from_raw_parts(self.buffer.add(start_index), first_part);
+
+                let first_slice =
+                    std::slice::from_raw_parts(self.buffer.add(start_index), first_part);
                 callback(first_slice);
-                
+
                 if second_part > 0 {
                     let second_slice = std::slice::from_raw_parts(self.buffer, second_part);
                     callback(second_slice);
                 }
             }
         }
-        
+
         // Update read head
-        self.read_head.store(read_pos + available, Ordering::Release);
+        self.read_head
+            .store(read_pos + available, Ordering::Release);
     }
 
     /// Get and reset the dropped event count
@@ -256,83 +275,76 @@ impl Drop for RingBuffer {
 struct SharedState {
     ring_buffer: RingBuffer,
     batch_start_ns: u64,
+    schema_version: u64,
     staging_dir: PathBuf,
     output_dir: PathBuf,
 }
 
-/// Configuration for the tracer
-#[derive(Debug, Clone)]
-pub struct TracerConfig {
-    /// Directory where trace files will be written
-    pub output_dir: PathBuf,
-
-    /// Size of the ring buffer in bytes (default: 512 MiB)
-    pub buffer_size: usize,
-
-    /// Flush interval (default: 1 second)
-    pub flush_interval: Duration,
+/// Builder for constructing a Tracer
+pub struct Builder {
+    output_dir: PathBuf,
+    buffer_size: usize,
+    flush_interval: Duration,
+    schemas: Vec<&'static Schema>,
 }
 
-impl Default for TracerConfig {
+impl Default for Builder {
     fn default() -> Self {
         Self {
             output_dir: PathBuf::from("./traces"),
             buffer_size: 512 * 1024 * 1024, // 512 MiB
-            flush_interval: Duration::from_secs(1),
+            flush_interval: Duration::from_millis(500),
+            schemas: Vec::new(),
         }
     }
 }
 
-impl TracerConfig {
-    /// Create a new tracer configuration with the specified output directory
-    pub fn new(output_dir: impl Into<PathBuf>) -> Self {
-        Self {
-            output_dir: output_dir.into(),
-            ..Default::default()
-        }
+impl Builder {
+    /// Create a new builder with default configuration
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Set the output directory
-    pub fn with_output_dir(mut self, output_dir: impl Into<PathBuf>) -> Self {
+    pub fn output_dir(mut self, output_dir: impl Into<PathBuf>) -> Self {
         self.output_dir = output_dir.into();
         self
     }
 
     /// Set the buffer size in bytes
-    pub fn with_buffer_size(mut self, size: usize) -> Self {
+    pub fn buffer_size(mut self, size: usize) -> Self {
         self.buffer_size = size;
         self
     }
 
     /// Set the flush interval
-    pub fn with_flush_interval(mut self, interval: Duration) -> Self {
+    pub fn flush_interval(mut self, interval: Duration) -> Self {
         self.flush_interval = interval;
         self
     }
-}
 
-/// Main tracer handle for recording events
-pub struct Tracer {
-    shared_state: Arc<SharedState>,
-}
+    /// Register a schema to be included in the trace
+    pub fn schema(mut self, schema: &'static Schema) -> Self {
+        self.schemas.push(schema);
+        self
+    }
 
-impl Tracer {
-    /// Create a new tracer with the given configuration
-    ///
-    /// This initializes the ring buffer, creates the staging and output directories,
-    /// and starts the background flusher thread.
-    pub fn new(config: TracerConfig) -> Result<Self, std::io::Error> {
+    /// Build the Tracer
+    pub fn build(self) -> Result<Tracer, std::io::Error> {
         // Create staging/ and output/ directories
-        let staging_dir = config.output_dir.join("staging");
-        let output_dir = config.output_dir.join("output");
+        let staging_dir = self.output_dir.join("staging");
+        let output_dir = self.output_dir.join("output");
         fs::create_dir_all(&staging_dir)?;
         fs::create_dir_all(&output_dir)?;
 
+        // Merge schemas and generate JSON
+        let (schema_version, schema_json) = self.generate_merged_schema();
+
         // Write schema file to output directory
-        write_schema_file(&output_dir)?;
+        write_schema_file(&output_dir, schema_version, &schema_json)?;
 
         // Initialize ring buffer
-        let ring_buffer = RingBuffer::new(config.buffer_size);
+        let ring_buffer = RingBuffer::new(self.buffer_size);
 
         // Get batch start timestamp
         let batch_start_ns = SystemTime::now()
@@ -344,20 +356,77 @@ impl Tracer {
         let shared_state = Arc::new(SharedState {
             ring_buffer,
             batch_start_ns,
+            schema_version,
             staging_dir,
             output_dir,
         });
 
         // Start flusher thread
         let flusher_state = shared_state.clone();
-        let flush_interval = config.flush_interval;
+        let flush_interval = self.flush_interval;
         thread::spawn(move || {
             flusher_thread_main(flusher_state, flush_interval);
         });
 
-        Ok(Self { shared_state })
+        Ok(Tracer { shared_state })
     }
 
+    fn generate_merged_schema(&self) -> (u64, String) {
+        use std::fmt::Write;
+
+        // Collect unique events by value
+        let mut events_map = BTreeMap::new();
+        for schema in &self.schemas {
+            for event in schema.events {
+                events_map.insert(event.value, (schema.module, event));
+            }
+        }
+
+        // Calculate combined hash
+        let mut hasher = FnvHasher::with_key(42);
+        for (module, event) in events_map.values() {
+            hasher.write_u64(event.value);
+            hasher.write(module.as_bytes());
+            hasher.write(event.name.as_bytes());
+            hasher.write(event.category.as_bytes());
+            hasher.write(event.description.as_bytes());
+        }
+        let schema_version = hasher.finish();
+
+        let mut json = String::new();
+
+        macro_rules! w {
+            ($($arg:tt)*) => {
+                write!(json, $($arg)*).unwrap();
+            };
+        }
+
+        w!("{{\"schema_version\":{schema_version},\"events\":[");
+        for (idx, (module, event)) in events_map.values().enumerate() {
+            if idx > 0 {
+                w!(",");
+            }
+            w!(
+                "{{\"value\":{},\"name\":{:?},\"category\":{:?},\"description\":{:?},\"module\":{:?}}}",
+                event.value,
+                event.name,
+                event.category,
+                event.description,
+                module
+            );
+        }
+        w!("]}}");
+
+        (schema_version, json)
+    }
+}
+
+/// Main tracer handle for recording events
+pub struct Tracer {
+    shared_state: Arc<SharedState>,
+}
+
+impl Tracer {
     /// Record a trace event
     ///
     /// The caller is responsible for populating the event structure,
@@ -366,16 +435,22 @@ impl Tracer {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use ojo_client::{Tracer, EventRecord, event_type};
-    /// # let tracer = Tracer::new(Default::default()).unwrap();
+    /// # fn main() {
+    /// use ojo_client::{Builder, EventRecord};
+    /// # let tracer = Builder::new().build().unwrap();
+    ///
+    /// # mod events {
+    /// #    pub const PACKET_SENT: u64 = 1;
+    /// # }
     ///
     /// let event = EventRecord {
     ///     ts_delta_ns: 12345, // Time delta from batch start
     ///     flow_id: 1,
-    ///     event_type: event_type::PACKET_SENT,
+    ///     event_type: events::PACKET_SENT,
     ///     payload: 100, // packet number
     /// };
     /// tracer.record(event);
+    /// # }
     /// ```
     pub fn record(&self, record: EventRecord) {
         // Write to ring buffer (lock-free)
@@ -384,18 +459,17 @@ impl Tracer {
 }
 
 /// Write the event schema JSON file to the output directory
-fn write_schema_file(output_dir: &std::path::Path) -> io::Result<()> {
-    let schema_filename = format!("event_schema_v{}.json", event_type::SCHEMA_VERSION);
+fn write_schema_file(output_dir: &std::path::Path, version: u64, json: &str) -> io::Result<()> {
+    let schema_filename = format!("event_schema_{:016x}.json", version);
     let schema_path = output_dir.join(schema_filename);
-    
+
     // Only write if the file doesn't already exist
     if !schema_path.exists() {
-        let schema_json = event_type::SCHEMA_JSON;
         let mut file = File::create(&schema_path)?;
-        file.write_all(schema_json.as_bytes())?;
+        file.write_all(json.as_bytes())?;
         file.sync_all()?;
     }
-    
+
     Ok(())
 }
 
@@ -424,24 +498,24 @@ fn flusher_thread_main(state: Arc<SharedState>, flush_interval: Duration) {
 }
 
 /// Flush events directly from ring buffer to a binary file
-fn flush_events_from_ring_buffer(
-    state: &SharedState,
-    batch_counter: &mut u64,
-) -> io::Result<()> {
+fn flush_events_from_ring_buffer(state: &SharedState, batch_counter: &mut u64) -> io::Result<()> {
     // Check for dropped events
     let dropped = state.ring_buffer.take_dropped_count();
-    
+
     // Check if we have any data to write
     let write_pos = state.ring_buffer.write_head.load(Ordering::Acquire);
     let read_pos = state.ring_buffer.read_head.load(Ordering::Acquire);
     let available = write_pos.wrapping_sub(read_pos);
-    
+
     if available == 0 && dropped == 0 {
         return Ok(());
     }
-    
+
     // Generate unique filename
-    let filename = format!("trace_{:016x}_{:08x}.bin", state.batch_start_ns, *batch_counter);
+    let filename = format!(
+        "trace_{:016x}_{:08x}.bin",
+        state.batch_start_ns, *batch_counter
+    );
     *batch_counter += 1;
 
     let staging_path = state.staging_dir.join(&filename);
@@ -451,17 +525,21 @@ fn flush_events_from_ring_buffer(
     let mut file = File::create(&staging_path)?;
 
     // Write header with schema version
-    let header = FileHeader::new(state.batch_start_ns, event_type::SCHEMA_VERSION);
+    let header = FileHeader::new(state.batch_start_ns, state.schema_version);
     file.write_all(header.as_bytes())?;
+
+    let mut ts_delta_ns = None;
 
     // Write events directly from ring buffer using callback
     state.ring_buffer.read(|slice| {
+        if ts_delta_ns.is_none()
+            && let Some(first) = slice.first()
+        {
+            ts_delta_ns = Some(first.ts_delta_ns);
+        }
         // Convert slice of EventRecords to bytes and write
         let bytes = unsafe {
-            std::slice::from_raw_parts(
-                slice.as_ptr() as *const u8,
-                std::mem::size_of_val(slice),
-            )
+            std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
         };
         if let Err(e) = file.write_all(bytes) {
             eprintln!("Error writing events to file: {}", e);
@@ -472,8 +550,8 @@ fn flush_events_from_ring_buffer(
     if dropped > 0 {
         let dropped_event = EventRecord {
             ts_delta_ns: 0,
-            flow_id: 0,
-            event_type: event_type::EVENTS_DROPPED,
+            flow_id: u64::MAX,
+            event_type: u64::MAX,
             payload: dropped,
         };
         file.write_all(dropped_event.as_bytes())?;
@@ -490,7 +568,7 @@ fn flush_events_from_ring_buffer(
 }
 
 /// Metadata for an event type
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EventTypeInfo {
     /// The event type value
     pub value: u64,
@@ -502,45 +580,67 @@ pub struct EventTypeInfo {
     pub description: &'static str,
 }
 
-// Include generated event types
-include!(concat!(env!("OUT_DIR"), "/event_types.rs"));
+/// Event schema containing namespace and event type information
+#[derive(Debug, Clone, Copy)]
+pub struct Schema {
+    pub module: &'static str,
+    pub namespace: u32,
+    pub events: &'static [EventTypeInfo],
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::thread;
-    use std::time::Duration;
+    use std::{fs, thread, time::Duration};
     use tempfile::TempDir;
 
-    #[test]
-    fn test_config_default() {
-        let config = TracerConfig::default();
-        assert_eq!(config.buffer_size, 512 * 1024 * 1024);
-        assert_eq!(config.flush_interval, Duration::from_secs(1));
+    mod events {
+        use super::*;
+
+        pub static SCHEMA: Schema = Schema {
+            module: "test",
+            namespace: 1,
+            events: &[EventTypeInfo {
+                value: 1,
+                name: "PACKET_SENT",
+                category: "Packet",
+                description: "Packet sent",
+            }],
+        };
+
+        pub const PACKET_SENT: u64 = 1;
+        pub const PACKET_ACKED: u64 = 2;
+        pub const PACKET_CREATED: u64 = 3;
     }
 
     #[test]
-    fn test_config_builder() {
-        let config = TracerConfig::default()
-            .with_output_dir("/tmp/traces")
-            .with_buffer_size(1024 * 1024)
-            .with_flush_interval(Duration::from_millis(500));
+    fn test_builder_defaults() {
+        let builder = Builder::new();
+        assert_eq!(builder.buffer_size, 512 * 1024 * 1024);
+        assert_eq!(builder.flush_interval, Duration::from_millis(500));
+    }
 
-        assert_eq!(config.output_dir, PathBuf::from("/tmp/traces"));
-        assert_eq!(config.buffer_size, 1024 * 1024);
-        assert_eq!(config.flush_interval, Duration::from_millis(500));
+    #[test]
+    fn test_builder_configuration() {
+        let builder = Builder::new()
+            .output_dir("/tmp/traces")
+            .buffer_size(1024 * 1024)
+            .flush_interval(Duration::from_millis(500));
+
+        assert_eq!(builder.output_dir, PathBuf::from("/tmp/traces"));
+        assert_eq!(builder.buffer_size, 1024 * 1024);
+        assert_eq!(builder.flush_interval, Duration::from_millis(500));
     }
 
     #[test]
     fn test_tracer_initialization() {
         let temp_dir = TempDir::new().unwrap();
-        let config = TracerConfig::default()
-            .with_output_dir(temp_dir.path())
-            .with_buffer_size(1024 * 1024);
+        let tracer = Builder::new()
+            .output_dir(temp_dir.path())
+            .buffer_size(1024 * 1024)
+            .build()
+            .unwrap();
 
-        let tracer = Tracer::new(config).unwrap();
-        
         // Check that directories were created
         assert!(temp_dir.path().join("staging").exists());
         assert!(temp_dir.path().join("output").exists());
@@ -551,19 +651,19 @@ mod tests {
     #[test]
     fn test_event_recording_and_flush() {
         let temp_dir = TempDir::new().unwrap();
-        let config = TracerConfig::default()
-            .with_output_dir(temp_dir.path())
-            .with_buffer_size(1024 * 1024)
-            .with_flush_interval(Duration::from_millis(100));
-
-        let tracer = Tracer::new(config).unwrap();
+        let tracer = Builder::new()
+            .output_dir(temp_dir.path())
+            .buffer_size(1024 * 1024)
+            .flush_interval(Duration::from_millis(100))
+            .build()
+            .unwrap();
 
         // Record some events
         for i in 0..10 {
             tracer.record(EventRecord {
                 ts_delta_ns: i * 1000,
                 flow_id: 1,
-                event_type: event_type::PACKET_SENT,
+                event_type: events::PACKET_SENT,
                 payload: i,
             });
         }
@@ -577,7 +677,7 @@ mod tests {
             .unwrap()
             .filter_map(Result::ok)
             .collect();
-        
+
         assert!(
             !entries.is_empty(),
             "Expected at least one trace file to be created"
@@ -595,7 +695,7 @@ mod tests {
             let record = EventRecord {
                 ts_delta_ns: i * 1000,
                 flow_id: 1,
-                event_type: event_type::PACKET_SENT,
+                event_type: events::PACKET_SENT,
                 payload: i,
             };
             assert!(buffer.write(&record));
@@ -612,7 +712,7 @@ mod tests {
         for (i, event) in events.iter().enumerate() {
             assert_eq!(event.ts_delta_ns, i as u64 * 1000);
             assert_eq!(event.flow_id, 1);
-            assert_eq!(event.event_type, event_type::PACKET_SENT);
+            assert_eq!(event.event_type, events::PACKET_SENT);
             assert_eq!(event.payload, i as u64);
         }
     }
@@ -629,7 +729,7 @@ mod tests {
             let record = EventRecord {
                 ts_delta_ns: i,
                 flow_id: 1,
-                event_type: event_type::PACKET_SENT,
+                event_type: events::PACKET_SENT,
                 payload: i,
             };
             assert!(buffer.write(&record), "Failed to write record {}", i);
@@ -639,29 +739,32 @@ mod tests {
         let record = EventRecord {
             ts_delta_ns: 100,
             flow_id: 1,
-            event_type: event_type::PACKET_SENT,
+            event_type: events::PACKET_SENT,
             payload: 100,
         };
         assert!(!buffer.write(&record));
 
         // Check dropped count
         assert_eq!(buffer.take_dropped_count(), 1);
-        
+
         // Read some events to make space
         let mut read_count = 0;
         buffer.read(|slice| {
             read_count += slice.len();
         });
         assert_eq!(read_count, 63); // All events should be read
-        
+
         // Now we should be able to write again
         let record = EventRecord {
             ts_delta_ns: 200,
             flow_id: 1,
-            event_type: event_type::PACKET_SENT,
+            event_type: events::PACKET_SENT,
             payload: 200,
         };
-        assert!(buffer.write(&record), "Should be able to write after reading");
+        assert!(
+            buffer.write(&record),
+            "Should be able to write after reading"
+        );
     }
 
     #[test]
@@ -686,34 +789,34 @@ mod tests {
     #[test]
     fn test_multiple_events_same_flow() {
         let temp_dir = TempDir::new().unwrap();
-        let config = TracerConfig::default()
-            .with_output_dir(temp_dir.path())
-            .with_buffer_size(1024 * 1024)
-            .with_flush_interval(Duration::from_millis(100));
-
-        let tracer = Tracer::new(config).unwrap();
+        let tracer = Builder::new()
+            .output_dir(temp_dir.path())
+            .buffer_size(1024 * 1024)
+            .flush_interval(Duration::from_millis(100))
+            .build()
+            .unwrap();
 
         // Simulate a packet lifecycle
         let flow_id = 42;
-        
+
         tracer.record(EventRecord {
             ts_delta_ns: 0,
             flow_id,
-            event_type: event_type::PACKET_CREATED,
+            event_type: events::PACKET_CREATED,
             payload: 1,
         });
 
         tracer.record(EventRecord {
             ts_delta_ns: 1000,
             flow_id,
-            event_type: event_type::PACKET_SENT,
+            event_type: events::PACKET_SENT,
             payload: 1,
         });
 
         tracer.record(EventRecord {
             ts_delta_ns: 2000,
             flow_id,
-            event_type: event_type::PACKET_ACKED,
+            event_type: events::PACKET_ACKED,
             payload: 1,
         });
 
@@ -726,12 +829,12 @@ mod tests {
     #[test]
     fn test_concurrent_event_recording() {
         let temp_dir = TempDir::new().unwrap();
-        let config = TracerConfig::default()
-            .with_output_dir(temp_dir.path())
-            .with_buffer_size(10 * 1024 * 1024)
-            .with_flush_interval(Duration::from_millis(200));
+        let builder = Builder::new()
+            .output_dir(temp_dir.path())
+            .buffer_size(10 * 1024 * 1024)
+            .flush_interval(Duration::from_millis(200));
 
-        let tracer = Arc::new(Tracer::new(config).unwrap());
+        let tracer = Arc::new(builder.build().unwrap());
 
         // Spawn multiple threads recording events
         let mut handles = vec![];
@@ -742,7 +845,7 @@ mod tests {
                     tracer_clone.record(EventRecord {
                         ts_delta_ns: i * 1000,
                         flow_id: thread_id,
-                        event_type: event_type::PACKET_SENT,
+                        event_type: events::PACKET_SENT,
                         payload: i,
                     });
                 }
@@ -764,22 +867,30 @@ mod tests {
     #[test]
     fn test_schema_file_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let config = TracerConfig::default()
-            .with_output_dir(temp_dir.path())
-            .with_buffer_size(1024 * 1024);
 
-        let tracer = Tracer::new(config).unwrap();
+        let tracer = Builder::new()
+            .output_dir(temp_dir.path())
+            .buffer_size(1024 * 1024)
+            .schema(&events::SCHEMA)
+            .build()
+            .unwrap();
 
         // Check that schema file was created in output directory
         let output_dir = temp_dir.path().join("output");
-        let schema_filename = format!("event_schema_v{}.json", event_type::SCHEMA_VERSION);
-        let schema_path = output_dir.join(schema_filename);
-        
-        assert!(
-            schema_path.exists(),
-            "Schema file should be created at {:?}",
-            schema_path
-        );
+
+        // Find schema file (name includes hash now)
+        let entries: Vec<_> = fs::read_dir(&output_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .collect();
+
+        let schema_file = entries
+            .iter()
+            .find(|e| e.file_name().to_string_lossy().starts_with("event_schema_"));
+
+        assert!(schema_file.is_some(), "Schema file should be created");
+
+        let schema_path = schema_file.unwrap().path();
 
         // Verify schema file content is valid JSON
         let schema_content = fs::read_to_string(&schema_path).unwrap();

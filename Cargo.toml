@@ -1,7 +1,8 @@
 [workspace]
 members = [
-    "crates/ojo-client",
     "crates/ojo",
+    "crates/ojo-builder",
+    "crates/ojo-client",
     "examples/simple",
 ]
 resolver = "2"
@@ -14,7 +15,7 @@ repository = "https://github.com/camshaft/ojo"
 authors = ["Cameron Bytheway <bytheway.cameron@gmail.com>"]
 
 [workspace.dependencies]
-# Shared dependencies across all crates
+fnv = "1"
 zerocopy = { version = "0.7", features = ["derive"] }
 
 [profile.release]

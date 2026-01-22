@@ -10,6 +10,7 @@ keywords = ["tracing", "networking", "performance", "protocol", "debugging"]
 categories = ["development-tools::profiling", "network-programming"]
 
 [dependencies]
+fnv.workspace = true
 zerocopy.workspace = true
 
 [dev-dependencies]
