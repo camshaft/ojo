@@ -28,5 +28,9 @@ tokio = { version = "1.35", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 zerocopy = { workspace = true, features = ["derive"] }
+axum = { version = "0.8.8", features = ["ws"] }
+tower-http = { version = "0.6.8", features = ["fs", "trace"] }
+futures = "0.3.31"
+base64 = "0.22.1"
 
 [dev-dependencies]

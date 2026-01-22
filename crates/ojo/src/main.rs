@@ -4,11 +4,13 @@
 
 use clap::{Parser, Subcommand};
 use duckdb::Connection;
-use std::path::PathBuf;
-use tracing::{error, info};
+use std::{path::PathBuf, sync::Arc};
+use tokio::sync::Notify;
+use tracing::{debug, error, info};
 
 mod ingester;
 mod loader;
+mod server;
 
 use ingester::Ingester;
 
@@ -68,7 +70,8 @@ async fn main() -> anyhow::Result<()> {
             let conn = Connection::open_in_memory()?;
             let ingester = Ingester::new(trace_dir, conn)?;
 
-            ingester_thread(ingester);
+            let notify = Arc::new(Notify::new());
+            ingester_thread(ingester, notify);
         }
 
         Commands::Serve {
@@ -95,30 +98,39 @@ async fn main() -> anyhow::Result<()> {
                 .try_clone()
                 .expect("Failed to clone database connection");
 
+            let notify = Arc::new(Notify::new());
+            let notify_clone = notify.clone();
+
             // Run ingestion in background
             let ingester =
                 Ingester::new(ingest_input, ingester_conn).expect("Failed to create ingester");
             std::thread::spawn(move || {
-                ingester_thread(ingester);
+                ingester_thread(ingester, notify_clone);
             });
 
-            // TODO: Implement explorer API and web server
-            info!("Server starting at http://{}:{}", host, port);
-
-            tokio::signal::ctrl_c().await?;
+            server::serve(conn, notify, host, port).await?;
         }
     }
 
     Ok(())
 }
 
-fn ingester_thread(mut ingester: Ingester) {
+fn ingester_thread(mut ingester: Ingester, notify: Arc<Notify>) {
     let mut last_snapshot: Option<std::time::Instant> = None;
 
     loop {
-        if let Err(e) = ingester.ingest_all() {
-            error!("Ingestion error: {}", e);
+        match ingester.ingest_all() {
+            Ok(true) => {
+                debug!("New data ingested, notifying listeners");
+                notify.notify_waiters();
+            }
+            Ok(false) => {}
+            Err(e) => {
+                error!("Ingestion error: {}", e);
+            }
         }
+
+        // Periodically export snapshots
         if last_snapshot.is_none_or(|v| v.elapsed().as_secs() >= 10) {
             if let Err(e) = ingester.export_snapshot() {
                 error!("Snapshot error: {}", e);

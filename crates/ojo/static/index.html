@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ojo Trace Explorer</title>
+    <style>
+        body { font-family: monospace; padding: 20px; }
+        .section { margin-bottom: 20px; border: 1px solid #ccc; padding: 10px; }
+        textarea { width: 100%; height: 200px; }
+    </style>
+    <script type="module">
+        import { tableFromIPC } from 'https://esm.sh/apache-arrow@14.0.0';
+
+        const ws = new WebSocket(`ws://${location.host}/ws`);
+        
+        ws.onopen = () => {
+            console.log("Connected");
+            document.getElementById('status').textContent = "Connected";
+            
+            // Subscribe to streams
+            subscribe("flows");
+            subscribe("stats");
+            subscribe("event_types");
+        };
+        
+        function subscribe(kind) {
+            ws.send(JSON.stringify({
+                type: "subscribe",
+                query: { kind }
+            }));
+        }
+
+        ws.onmessage = async (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                console.log("Received", msg);
+                
+                if (msg.type === "update") {
+                    const binaryString = atob(msg.data);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    try {
+                        const table = tableFromIPC(bytes);
+                        console.log("Arrow Table:", table);
+                        
+                        const elementId = msg.query.kind.toLowerCase() + "-data";
+                        const el = document.getElementById(elementId);
+                        if (el) {
+                            el.value = table.toString();
+                        }
+                    } catch (e) {
+                         console.error("Error parsing Arrow IPC:", e);
+                    }
+                }
+            } catch (e) {
+                console.error("Error handling message:", e);
+            }
+        };
+
+        ws.onclose = () => {
+            document.getElementById('status').textContent = "Disconnected";
+        }
+    </script>
+</head>
+<body>
+    <h1>Ojo Trace Explorer</h1>
+    <div id="status">Connecting...</div>
+    
+    <div class="section">
+        <h2>Flows</h2>
+        <textarea id="flows-data" readonly></textarea>
+    </div>
+
+    <div class="section">
+        <h2>Event Types</h2>
+        <textarea id="event_types-data" readonly></textarea>
+    </div>
+
+    <div class="section">
+        <h2>Stats</h2>
+        <textarea id="stats-data" readonly></textarea>
+    </div>
+</body>
+</html>

@@ -41,7 +41,7 @@ impl Ingester {
             "
             -- Tracks ingested trace files but not yet rolled up
             CREATE TABLE IF NOT EXISTS pending_rollup (
-                filename TEXT PRIMARY KEY,
+                filename TEXT PRIMARY KEY
             );
             -- Tracks event schemas
             CREATE TABLE IF NOT EXISTS event_schemas (
@@ -78,68 +78,77 @@ impl Ingester {
         Ok(())
     }
 
-    pub fn ingest_all(&mut self) -> Result<()> {
-        self.ingest_schemas()?;
-        self.ingest_traces()?;
-        Ok(())
+    pub fn ingest_all(&mut self) -> Result<bool> {
+        let schemas_changed = self.ingest_schemas()?;
+        let traces_changed = self.ingest_traces()?;
+        Ok(schemas_changed || traces_changed)
     }
 
-    pub fn ingest_schemas(&self) -> Result<()> {
+    pub fn ingest_schemas(&self) -> Result<bool> {
         if !self.schema_dir.exists() {
-            return Ok(());
+            return Ok(false);
         }
 
+        let mut changed = false;
         for entry in std::fs::read_dir(&self.schema_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if let Err(e) = self.ingest_schema_file(&path) {
-                error!("Failed to ingest schema file {:?}: {}", path, e);
+            match self.ingest_schema_file(&path) {
+                Ok(c) => changed |= c,
+                Err(e) => {
+                    error!("Failed to ingest schema file {:?}: {}", path, e);
+                }
             }
         }
-        Ok(())
+        Ok(changed)
     }
 
-    fn ingest_schema_file(&self, path: &Path) -> Result<()> {
+    fn ingest_schema_file(&self, path: &Path) -> Result<bool> {
         let filename = path.file_name().unwrap_or_default().to_string_lossy();
 
         if !(filename.starts_with("event_schema_") && filename.ends_with(".json")) {
-            return Ok(());
+            return Ok(false);
         }
 
         debug!("Loading schema {:?}", path);
         let batch = loader::load_schema_file(path)?;
-        // Write to temp parquet to load into DuckDB
+
+        // optimization: check if IDs already exists
+
         let mut file = NamedTempFile::with_suffix_in(".parquet", &self.staging_dir)?;
         let mut writer = ArrowWriter::try_new(&mut file, batch.schema(), None)?;
         writer.write(&batch)?;
         writer.close()?;
 
-        // Load from parquet
-        self.conn.execute(
+        let count = self.conn.execute(
             "INSERT OR REPLACE INTO event_schemas SELECT * FROM read_parquet(?)",
             [file.path().to_string_lossy()],
         )?;
 
-        Ok(())
+        // If count > 0, we changed something? NOT NECESSARILY with INSERT OR REPLACE where it might just replace with same data.
+        // But `execute` returns number of rows affected.
+
+        Ok(count > 0)
     }
 
-    pub fn ingest_traces(&mut self) -> Result<()> {
+    pub fn ingest_traces(&mut self) -> Result<bool> {
         if !self.raw_dir.exists() {
-            return Ok(());
+            return Ok(false);
         }
 
+        let mut changed = false;
         for entry in std::fs::read_dir(&self.raw_dir)? {
             let entry = entry?;
             let path = entry.path();
             match self.ingest_raw_trace_file(&path) {
-                Ok(_ingested) => {}
+                Ok(ingested) => changed |= ingested,
                 Err(e) => {
                     error!("Failed to ingest trace file {:?}: {}", path, e);
                 }
             }
         }
 
-        Ok(())
+        Ok(changed)
     }
 
     fn ingest_raw_trace_file(&mut self, path: &Path) -> Result<bool> {
