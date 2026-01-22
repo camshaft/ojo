@@ -450,14 +450,8 @@ fn flush_events_to_file(
     file.write_all(header.as_bytes())?;
 
     // Write events as raw bytes
-    if !events.is_empty() {
-        let bytes = unsafe {
-            std::slice::from_raw_parts(
-                events.as_ptr() as *const u8,
-                events.len() * std::mem::size_of::<EventRecord>(),
-            )
-        };
-        file.write_all(bytes)?;
+    for event in events {
+        file.write_all(event.as_bytes())?;
     }
 
     // Write dropped events record if any
