@@ -629,53 +629,55 @@ export function FlowDetail() {
               <label className="flex items-center gap-1 text-sm text-gray-700">
                 Start (ms)
                 <input
-                  type="range"
+                  type="number"
                   step="0.1"
                   className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
                   min={chartData.timeDomain.min}
                   max={chartData.timeDomain.max}
                   value={rangeInputs?.start ?? ""}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newStart = e.target.value;
                     setRangeInputs((prev) => ({
-                      start: e.target.value,
+                      start: newStart,
                       end: prev?.end ?? "",
-                    }))
-                  }
+                    }));
+                    const start = Number(newStart);
+                    const end = Number(rangeInputs?.end ?? "");
+                    const startValid = Number.isFinite(start);
+                    const endValid = Number.isFinite(end);
+                    updateRangeParams(
+                      startValid ? start : null,
+                      endValid ? end : null,
+                    );
+                  }}
                 />
               </label>
               <label className="flex items-center gap-1 text-sm text-gray-700">
                 End (ms)
                 <input
-                  type="range"
+                  type="number"
                   step="0.1"
                   className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
                   min={chartData.timeDomain.min}
                   max={chartData.timeDomain.max}
                   value={rangeInputs?.end ?? ""}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const newEnd = e.target.value;
                     setRangeInputs((prev) => ({
                       start: prev?.start ?? "",
-                      end: e.target.value,
-                    }))
-                  }
+                      end: newEnd,
+                    }));
+                    const start = Number(rangeInputs?.start ?? "");
+                    const end = Number(newEnd);
+                    const startValid = Number.isFinite(start);
+                    const endValid = Number.isFinite(end);
+                    updateRangeParams(
+                      startValid ? start : null,
+                      endValid ? end : null,
+                    );
+                  }}
                 />
               </label>
-              <button
-                type="button"
-                className="inline-flex items-center rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:bg-indigo-700"
-                onClick={() => {
-                  const start = Number(rangeInputs?.start ?? "");
-                  const end = Number(rangeInputs?.end ?? "");
-                  const startValid = Number.isFinite(start);
-                  const endValid = Number.isFinite(end);
-                  updateRangeParams(
-                    startValid ? start : null,
-                    endValid ? end : null,
-                  );
-                }}
-              >
-                Apply
-              </button>
               <button
                 type="button"
                 className="inline-flex items-center rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
