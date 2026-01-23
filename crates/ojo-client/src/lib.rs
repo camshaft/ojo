@@ -72,14 +72,16 @@
 
 use fnv::FnvHasher;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     fs::{self, File},
     hash::Hasher,
     io::{self, Write},
+    mem::MaybeUninit,
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -121,163 +123,251 @@ pub struct EventRecord {
     pub secondary: u64,
 }
 
-/// Lock-free ring buffer for event storage
-struct RingBuffer {
-    buffer: *mut EventRecord,
-    write_head: AtomicUsize,
-    read_head: AtomicUsize,
-    dropped_count: AtomicU64,
-    capacity: usize,      // Number of records (must be power of 2)
-    capacity_mask: usize, // capacity - 1, for fast modulo
+// Number of event slots per CPU page (approximately 256 KiB per page)
+const SLOTS_PER_PAGE: usize = 8 * 1024 - 1;
+
+/// Per-CPU page for event storage
+/// Aligned to cache line to avoid false sharing
+#[repr(C, align(128))]
+struct EventPage {
+    // EventRecords written to slots
+    slots: [MaybeUninit<EventRecord>; SLOTS_PER_PAGE],
+    // Number of slots currently filled
+    length: AtomicUsize,
 }
 
-unsafe impl Send for RingBuffer {}
-unsafe impl Sync for RingBuffer {}
+impl EventPage {
+    fn new() -> Box<EventPage> {
+        Box::new(EventPage {
+            slots: [const { MaybeUninit::uninit() }; SLOTS_PER_PAGE],
+            length: AtomicUsize::new(0),
+        })
+    }
+}
 
-impl RingBuffer {
-    fn new(capacity_bytes: usize) -> Self {
-        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-
-        // Calculate capacity in records
-        let mut capacity = capacity_bytes / RECORD_SIZE;
-
-        // Ensure capacity is at least 64 records
-        if capacity < 64 {
-            capacity = 64;
+/// Determine the number of possible CPUs
+fn possible_cpus() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(content) = fs::read_to_string("/sys/devices/system/cpu/possible") {
+            let max_cpu = content
+                .trim()
+                .split(',')
+                .map(|range| {
+                    if let Some((_start, end)) = range.split_once('-') {
+                        end.parse::<usize>().unwrap_or(0)
+                    } else {
+                        range.parse::<usize>().unwrap_or(0)
+                    }
+                })
+                .max()
+                .unwrap_or(0);
+            return max_cpu.max(1) + 1;
         }
+    }
 
-        // Round up to next power of two
-        capacity = capacity.next_power_of_two();
+    // Fallback to available parallelism
+    std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(4)
+}
 
-        let capacity_mask = capacity - 1;
+/// Per-CPU event collection system
+/// This replaces the global ring buffer with per-CPU pages for better scalability
+struct PerCpuEventCollector {
+    // Per-CPU pages - one atomic pointer per CPU
+    per_cpu_pages: Box<[AtomicPtr<EventPage>]>,
 
-        // Allocate buffer
-        let layout = std::alloc::Layout::array::<EventRecord>(capacity).unwrap();
-        let buffer = unsafe { std::alloc::alloc(layout) as *mut EventRecord };
+    // Fallback queue for when per-CPU write fails
+    fallback_queue: parking_lot::RwLock<Vec<EventRecord>>,
 
-        if buffer.is_null() {
-            panic!("Failed to allocate ring buffer");
-        }
+    // Pool of empty pages for reuse
+    empty_pages: crossbeam_queue::SegQueue<Box<EventPage>>,
+
+    // Track dropped events
+    dropped_count: AtomicU64,
+}
+
+unsafe impl Send for PerCpuEventCollector {}
+unsafe impl Sync for PerCpuEventCollector {}
+
+impl PerCpuEventCollector {
+    fn new(_capacity_bytes: usize) -> Self {
+        let num_cpus = possible_cpus();
 
         Self {
-            buffer,
-            write_head: AtomicUsize::new(0),
-            read_head: AtomicUsize::new(0),
+            per_cpu_pages: (0..num_cpus)
+                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
+                .collect(),
+            fallback_queue: parking_lot::RwLock::new(Vec::new()),
+            empty_pages: crossbeam_queue::SegQueue::new(),
             dropped_count: AtomicU64::new(0),
-            capacity,
-            capacity_mask,
         }
     }
 
-    /// Try to write an event record to the ring buffer
-    /// Returns true if successful, false if buffer is full
+    /// Write an event to the per-CPU page or fallback
     fn write(&self, record: &EventRecord) -> bool {
-        loop {
-            let write_pos = self.write_head.load(Ordering::Acquire);
-            let read_pos = self.read_head.load(Ordering::Acquire);
-
-            // Calculate used space (in records)
-            let used = write_pos.wrapping_sub(read_pos);
-
-            // Check if there's enough space (leave one slot to distinguish full from empty)
-            if used >= self.capacity - 1 {
-                // Buffer full, drop event
-                self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                return false;
-            }
-
-            // Try to reserve space using CAS
-            let new_write_pos = write_pos.wrapping_add(1);
-            if self
-                .write_head
-                .compare_exchange(
-                    write_pos,
-                    new_write_pos,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                // CAS failed, retry
-                continue;
-            }
-
-            // Successfully reserved space, write the data
-            let index = write_pos & self.capacity_mask;
-            unsafe {
-                std::ptr::write(self.buffer.add(index), *record);
-            }
-
-            // Release fence to ensure visibility
-            std::sync::atomic::fence(Ordering::Release);
-            return true;
-        }
-    }
-
-    /// Read available events from the ring buffer using a callback
-    /// The callback receives slices of all available events
-    fn read<F>(&self, mut callback: F)
-    where
-        F: FnMut(&[EventRecord]),
-    {
-        let write_pos = self.write_head.load(Ordering::Acquire);
-        let read_pos = self.read_head.load(Ordering::Acquire);
-
-        // Calculate available records
-        let available = write_pos.wrapping_sub(read_pos);
-
-        if available == 0 {
-            return;
-        }
-
-        // Create slice from buffer (no wrap-around with masking)
-        let start_index = read_pos & self.capacity_mask;
-        let end_index = (read_pos + available) & self.capacity_mask;
-
-        unsafe {
-            if end_index > start_index || end_index == 0 {
-                // Contiguous read (or exactly at boundary)
-                let slice = std::slice::from_raw_parts(self.buffer.add(start_index), available);
-                callback(slice);
-            } else {
-                // Split read (wrapped around)
-                let first_part = self.capacity - start_index;
-                let second_part = available - first_part;
-
-                let first_slice =
-                    std::slice::from_raw_parts(self.buffer.add(start_index), first_part);
-                callback(first_slice);
-
-                if second_part > 0 {
-                    let second_slice = std::slice::from_raw_parts(self.buffer, second_part);
-                    callback(second_slice);
+        // Try to get current CPU and write to its page
+        if let Some(cpu_id) = self.get_cpu_id() {
+            if cpu_id < self.per_cpu_pages.len() {
+                if self.try_write_to_cpu_page(cpu_id, record) {
+                    return true;
                 }
             }
         }
 
-        // Update read head
-        self.read_head
-            .store(read_pos + available, Ordering::Release);
+        // Fall back to thread-local or global queue
+        self.fallback_push(record);
+        true
     }
 
-    /// Get and reset the dropped event count
+    /// Get the current CPU ID (simplified version without rseq)
+    fn get_cpu_id(&self) -> Option<usize> {
+        // For now, use a thread-local hash as a simple CPU affinity approximation
+        // In production, this could use rseq on Linux or similar mechanisms
+        thread_local! {
+            static CPU_SLOT: Cell<Option<usize>> = const { Cell::new(None) };
+        }
+
+        CPU_SLOT.with(|slot| {
+            if let Some(cpu) = slot.get() {
+                return Some(cpu);
+            }
+
+            // Hash thread ID to a CPU slot
+            let thread_id = std::thread::current().id();
+            let hash = format!("{:?}", thread_id).as_bytes().iter().fold(0u64, |acc, &b| {
+                acc.wrapping_mul(31).wrapping_add(b as u64)
+            });
+            let cpu = (hash % self.per_cpu_pages.len() as u64) as usize;
+            slot.set(Some(cpu));
+            Some(cpu)
+        })
+    }
+
+    /// Try to write to a specific CPU's page
+    fn try_write_to_cpu_page(&self, cpu_id: usize, record: &EventRecord) -> bool {
+        let page_ptr = self.per_cpu_pages[cpu_id].load(Ordering::Acquire);
+
+        // If no page exists, try to allocate one
+        let page_ptr = if page_ptr.is_null() {
+            let new_page = self.empty_pages.pop().unwrap_or_else(EventPage::new);
+            let new_ptr = Box::into_raw(new_page);
+
+            match self.per_cpu_pages[cpu_id].compare_exchange(
+                std::ptr::null_mut(),
+                new_ptr,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => new_ptr,
+                Err(existing) => {
+                    // Another thread allocated first, reuse that and save our page
+                    let reclaimed = unsafe { Box::from_raw(new_ptr) };
+                    self.empty_pages.push(reclaimed);
+                    existing
+                }
+            }
+        } else {
+            page_ptr
+        };
+
+        // Try to write to the page
+        unsafe {
+            let page = &*page_ptr;
+            let current_len = page.length.load(Ordering::Acquire);
+
+            if current_len >= SLOTS_PER_PAGE {
+                // Page is full, need to rotate
+                return false;
+            }
+
+            // Try to reserve a slot
+            match page.length.compare_exchange(
+                current_len,
+                current_len + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    // Successfully reserved slot, write the event
+                    let slot_ptr = page.slots[current_len].as_ptr() as *mut EventRecord;
+                    std::ptr::write(slot_ptr, *record);
+                    std::sync::atomic::fence(Ordering::Release);
+                    true
+                }
+                Err(_) => {
+                    // Another thread took this slot, retry
+                    false
+                }
+            }
+        }
+    }
+
+    /// Push to fallback queue
+    fn fallback_push(&self, record: &EventRecord) {
+        let guard = self.fallback_queue.write();
+        // Simple append - in production might want to check size limits
+        let mut queue = guard;
+        queue.push(*record);
+    }
+
+    /// Collect all events from all CPU pages
+    fn collect_all_events(&self) -> Vec<EventRecord> {
+        let mut all_events = Vec::new();
+
+        // Collect from per-CPU pages
+        for cpu_page in self.per_cpu_pages.iter() {
+            let page_ptr = cpu_page.swap(std::ptr::null_mut(), Ordering::AcqRel);
+
+            if !page_ptr.is_null() {
+                unsafe {
+                    let mut page = Box::from_raw(page_ptr);
+                    let length = *page.length.get_mut();
+
+                    // Copy events from page
+                    for i in 0..length {
+                        all_events.push(page.slots[i].assume_init());
+                    }
+
+                    // Reset and return page to pool
+                    *page.length.get_mut() = 0;
+                    self.empty_pages.push(page);
+                }
+            }
+        }
+
+        // Collect from fallback queue
+        let mut fallback = self.fallback_queue.write();
+        all_events.extend_from_slice(&fallback);
+        fallback.clear();
+
+        all_events
+    }
+
+    /// Get and reset dropped count
     fn take_dropped_count(&self) -> u64 {
         self.dropped_count.swap(0, Ordering::Relaxed)
     }
 }
 
-impl Drop for RingBuffer {
+impl Drop for PerCpuEventCollector {
     fn drop(&mut self) {
-        let layout = std::alloc::Layout::array::<EventRecord>(self.capacity).unwrap();
-        unsafe {
-            std::alloc::dealloc(self.buffer as *mut u8, layout);
+        // Clean up all allocated pages
+        for cpu_page in self.per_cpu_pages.iter_mut() {
+            let page_ptr = *cpu_page.get_mut();
+            if !page_ptr.is_null() {
+                unsafe {
+                    drop(Box::from_raw(page_ptr));
+                }
+            }
         }
     }
 }
 
 /// Shared state between tracer and flusher thread
 struct SharedState {
-    ring_buffer: RingBuffer,
+    event_collector: PerCpuEventCollector,
     batch_start_ns: u64,
     schema_version: u64,
     staging_dir: PathBuf,
@@ -349,8 +439,8 @@ impl Builder {
         // Write schema file to output directory
         write_schema_file(&schema_dir, schema_version, &schema_json)?;
 
-        // Initialize ring buffer
-        let ring_buffer = RingBuffer::new(self.buffer_size);
+        // Initialize per-CPU event collector
+        let event_collector = PerCpuEventCollector::new(self.buffer_size);
 
         // Get batch start timestamp
         let batch_start_ns = SystemTime::now()
@@ -360,7 +450,7 @@ impl Builder {
 
         // Create shared state
         let shared_state = Arc::new(SharedState {
-            ring_buffer,
+            event_collector,
             batch_start_ns,
             schema_version,
             staging_dir,
@@ -462,8 +552,8 @@ impl Tracer {
     /// # }
     /// ```
     pub fn record(&self, record: EventRecord) {
-        // Write to ring buffer (lock-free)
-        self.shared_state.ring_buffer.write(&record);
+        // Write to per-CPU event collector (lock-free per-CPU pages)
+        self.shared_state.event_collector.write(&record);
     }
 }
 
@@ -493,30 +583,28 @@ fn flusher_thread_main(state: Arc<SharedState>, flush_interval: Duration) {
         // Check if we're the last reference (tracer dropped)
         if Arc::strong_count(&state) == 1 {
             // Do final flush and exit
-            if let Err(e) = flush_events_from_ring_buffer(&state, &mut batch_counter) {
+            if let Err(e) = flush_events_from_per_cpu_collector(&state, &mut batch_counter) {
                 eprintln!("Error flushing events to file: {}", e);
             }
             break;
         }
 
-        // Flush events from ring buffer
-        if let Err(e) = flush_events_from_ring_buffer(&state, &mut batch_counter) {
+        // Flush events from per-CPU collector
+        if let Err(e) = flush_events_from_per_cpu_collector(&state, &mut batch_counter) {
             eprintln!("Error flushing events to file: {}", e);
         }
     }
 }
 
-/// Flush events directly from ring buffer to a binary file
-fn flush_events_from_ring_buffer(state: &SharedState, batch_counter: &mut u64) -> io::Result<()> {
+/// Flush events from per-CPU collector to a binary file
+fn flush_events_from_per_cpu_collector(state: &SharedState, batch_counter: &mut u64) -> io::Result<()> {
+    // Collect all events from per-CPU pages
+    let events = state.event_collector.collect_all_events();
+
     // Check for dropped events
-    let dropped = state.ring_buffer.take_dropped_count();
+    let dropped = state.event_collector.take_dropped_count();
 
-    // Check if we have any data to write
-    let write_pos = state.ring_buffer.write_head.load(Ordering::Acquire);
-    let read_pos = state.ring_buffer.read_head.load(Ordering::Acquire);
-    let available = write_pos.wrapping_sub(read_pos);
-
-    if available == 0 && dropped == 0 {
+    if events.is_empty() && dropped == 0 {
         return Ok(());
     }
 
@@ -537,23 +625,16 @@ fn flush_events_from_ring_buffer(state: &SharedState, batch_counter: &mut u64) -
     let header = FileHeader::new(state.batch_start_ns, state.schema_version);
     file.write_all(header.as_bytes())?;
 
-    let mut ts_delta_ns = None;
-
-    // Write events directly from ring buffer using callback
-    state.ring_buffer.read(|slice| {
-        if ts_delta_ns.is_none()
-            && let Some(first) = slice.first()
-        {
-            ts_delta_ns = Some(first.ts_delta_ns);
-        }
-        // Convert slice of EventRecords to bytes and write
+    // Write all collected events
+    if !events.is_empty() {
         let bytes = unsafe {
-            std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
+            std::slice::from_raw_parts(
+                events.as_ptr() as *const u8,
+                events.len() * std::mem::size_of::<EventRecord>(),
+            )
         };
-        if let Err(e) = file.write_all(bytes) {
-            eprintln!("Error writing events to file: {}", e);
-        }
-    });
+        file.write_all(bytes)?;
+    }
 
     // Write dropped events record if any
     if dropped > 0 {
@@ -714,8 +795,8 @@ mod tests {
     }
 
     #[test]
-    fn test_ring_buffer_write_and_read() {
-        let buffer = RingBuffer::new(1024 * 1024);
+    fn test_per_cpu_collector_write_and_read() {
+        let collector = PerCpuEventCollector::new(1024 * 1024);
 
         // Write some events
         for i in 0..10 {
@@ -726,14 +807,11 @@ mod tests {
                 primary: i,
                 secondary: 0,
             };
-            assert!(buffer.write(&record));
+            assert!(collector.write(&record));
         }
 
-        // Read events back using callback
-        let mut events = Vec::new();
-        buffer.read(|slice| {
-            events.extend_from_slice(slice);
-        });
+        // Collect events back
+        let events = collector.collect_all_events();
         assert_eq!(events.len(), 10);
 
         // Verify event data
@@ -746,45 +824,29 @@ mod tests {
     }
 
     #[test]
-    fn test_ring_buffer_overflow() {
-        // Create a small buffer
-        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-        let buffer = RingBuffer::new(RECORD_SIZE * 10);
+    fn test_per_cpu_collector_page_overflow() {
+        // Create a collector
+        let collector = PerCpuEventCollector::new(1024 * 1024);
 
-        // The buffer will hold at least 64 records (minimum), so fill more
-        let capacity = 63; // Leave one slot
-        for i in 0..capacity {
+        // Fill up more than one page worth of events
+        let events_to_write = SLOTS_PER_PAGE + 100;
+        for i in 0..events_to_write {
             let record = EventRecord {
-                ts_delta_ns: i,
+                ts_delta_ns: i as u64,
                 flow_id: 1,
                 event_type: events::PACKET_SENT,
-                primary: i,
+                primary: i as u64,
                 secondary: 0,
             };
-            assert!(buffer.write(&record), "Failed to write record {}", i);
+            // All writes should succeed (they go to fallback when page is full)
+            assert!(collector.write(&record), "Failed to write record {}", i);
         }
 
-        // Try to write more - should fail since buffer is now full
-        let record = EventRecord {
-            ts_delta_ns: 100,
-            flow_id: 1,
-            event_type: events::PACKET_SENT,
-            primary: 100,
-            secondary: 0,
-        };
-        assert!(!buffer.write(&record));
+        // Collect all events
+        let events = collector.collect_all_events();
+        assert_eq!(events.len(), events_to_write);
 
-        // Check dropped count
-        assert_eq!(buffer.take_dropped_count(), 1);
-
-        // Read some events to make space
-        let mut read_count = 0;
-        buffer.read(|slice| {
-            read_count += slice.len();
-        });
-        assert_eq!(read_count, 63); // All events should be read
-
-        // Now we should be able to write again
+        // Verify we can write again after collection
         let record = EventRecord {
             ts_delta_ns: 200,
             flow_id: 1,
@@ -793,8 +855,8 @@ mod tests {
             secondary: 0,
         };
         assert!(
-            buffer.write(&record),
-            "Should be able to write after reading"
+            collector.write(&record),
+            "Should be able to write after collection"
         );
     }
 

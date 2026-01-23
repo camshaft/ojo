@@ -12,6 +12,8 @@ categories = ["development-tools::profiling", "network-programming"]
 [dependencies]
 fnv.workspace = true
 zerocopy.workspace = true
+parking_lot = "0.12"
+crossbeam-queue = "0.3"
 
 [dev-dependencies]
 tempfile = "3.8"
