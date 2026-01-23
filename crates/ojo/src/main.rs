@@ -91,10 +91,6 @@ async fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&trace_dir)?;
             let trace_dir = trace_dir.canonicalize()?;
 
-            let db_path = trace_dir.join("ojo.db");
-            info!("  Database path: {:?}", db_path);
-            let db_file = tempfile::TempPath::from_path(db_path);
-
             let ingest_input = trace_dir.clone();
 
             let conn = Connection::open_in_memory().unwrap();

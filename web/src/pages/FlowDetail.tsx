@@ -452,7 +452,7 @@ export function FlowDetail() {
             y2: "max",
             stroke: "eventType",
             strokeOpacity: 0.6,
-            strokeWidth: 2.5,
+            strokeWidth: 10.5,
             title: (d: any) =>
               `${d.eventType}\n${formatDurationMs(d.startTime)} - ${formatDurationMs(d.endTime)}\nmin ${d.min}, max ${d.max} (${d.count} events)`,
           }),
