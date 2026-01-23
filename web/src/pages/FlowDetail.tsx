@@ -222,6 +222,26 @@ export function FlowDetail() {
     setSearchParams(params);
   };
 
+  const handleRangeInputChange = (
+    field: "start" | "end",
+    newValue: string,
+  ) => {
+    setRangeInputs((prev) => {
+      const start = field === "start" ? Number(newValue) : Number(prev?.start ?? "");
+      const end = field === "end" ? Number(newValue) : Number(prev?.end ?? "");
+      const startValid = Number.isFinite(start);
+      const endValid = Number.isFinite(end);
+      updateRangeParams(
+        startValid ? start : null,
+        endValid ? end : null,
+      );
+      return {
+        start: field === "start" ? newValue : prev?.start ?? "",
+        end: field === "end" ? newValue : prev?.end ?? "",
+      };
+    });
+  };
+
   const toggleEvent = (id: string) => {
     const set = new Set(orderedSelectedEvents);
     if (set.has(id)) {
@@ -625,66 +645,44 @@ export function FlowDetail() {
                 </span>
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <label className="flex items-center gap-1 text-sm text-gray-700">
-                Start (ms)
+            <div className="flex flex-col gap-4">
+              <label className="flex flex-col gap-2 text-sm text-gray-700">
+                <div className="flex items-center justify-between">
+                  <span>Start (ms)</span>
+                  <span className="text-xs font-mono text-gray-500">
+                    {rangeInputs?.start ?? ""}
+                  </span>
+                </div>
                 <input
-                  type="number"
+                  type="range"
                   step="0.1"
-                  className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                  className="w-full"
                   min={chartData.timeDomain.min}
                   max={chartData.timeDomain.max}
                   value={rangeInputs?.start ?? ""}
-                  onChange={(e) => {
-                    const newStart = e.target.value;
-                    setRangeInputs((prev) => {
-                      const start = Number(newStart);
-                      const end = Number(prev?.end ?? "");
-                      const startValid = Number.isFinite(start);
-                      const endValid = Number.isFinite(end);
-                      updateRangeParams(
-                        startValid ? start : null,
-                        endValid ? end : null,
-                      );
-                      return {
-                        start: newStart,
-                        end: prev?.end ?? "",
-                      };
-                    });
-                  }}
+                  onChange={(e) => handleRangeInputChange("start", e.target.value)}
                 />
               </label>
-              <label className="flex items-center gap-1 text-sm text-gray-700">
-                End (ms)
+              <label className="flex flex-col gap-2 text-sm text-gray-700">
+                <div className="flex items-center justify-between">
+                  <span>End (ms)</span>
+                  <span className="text-xs font-mono text-gray-500">
+                    {rangeInputs?.end ?? ""}
+                  </span>
+                </div>
                 <input
-                  type="number"
+                  type="range"
                   step="0.1"
-                  className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                  className="w-full"
                   min={chartData.timeDomain.min}
                   max={chartData.timeDomain.max}
                   value={rangeInputs?.end ?? ""}
-                  onChange={(e) => {
-                    const newEnd = e.target.value;
-                    setRangeInputs((prev) => {
-                      const start = Number(prev?.start ?? "");
-                      const end = Number(newEnd);
-                      const startValid = Number.isFinite(start);
-                      const endValid = Number.isFinite(end);
-                      updateRangeParams(
-                        startValid ? start : null,
-                        endValid ? end : null,
-                      );
-                      return {
-                        start: prev?.start ?? "",
-                        end: newEnd,
-                      };
-                    });
-                  }}
+                  onChange={(e) => handleRangeInputChange("end", e.target.value)}
                 />
               </label>
               <button
                 type="button"
-                className="inline-flex items-center rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+                className="inline-flex items-center justify-center rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
                 onClick={() => updateRangeParams(null, null)}
               >
                 Reset
