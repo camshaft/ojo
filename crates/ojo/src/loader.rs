@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow, bail};
 use arrow::{
-    array::{RecordBatch, StringArray, UInt64Array},
+    array::{RecordBatch, StringArray, UInt8Array, UInt64Array},
     datatypes::{DataType, Field, Schema},
 };
 use ojo_client::{EventRecord, FileHeader};
@@ -38,7 +38,8 @@ pub fn load_trace_file(path: &Path) -> Result<RecordBatch> {
     let mut batch_ids = Vec::with_capacity(count);
     let mut flow_ids = Vec::with_capacity(count);
     let mut event_types = Vec::with_capacity(count);
-    let mut payloads = Vec::with_capacity(count);
+    let mut primary = Vec::with_capacity(count);
+    let mut secondary = Vec::with_capacity(count);
 
     // We accept that the buffer might not be aligned, so we copy.
     // In a zero-copy optimization we would mmap and strict align, but file read is simpler.
@@ -54,7 +55,8 @@ pub fn load_trace_file(path: &Path) -> Result<RecordBatch> {
         batch_ids.push(header.batch_start_ns);
         flow_ids.push(record.flow_id);
         event_types.push(record.event_type);
-        payloads.push(record.payload);
+        primary.push(record.primary);
+        secondary.push(record.secondary);
     }
 
     let schema = Schema::new(vec![
@@ -62,7 +64,8 @@ pub fn load_trace_file(path: &Path) -> Result<RecordBatch> {
         Field::new("batch_id", DataType::UInt64, false),
         Field::new("flow_id", DataType::UInt64, false),
         Field::new("event_type", DataType::UInt64, false),
-        Field::new("payload", DataType::UInt64, false),
+        Field::new("primary_value", DataType::UInt64, false),
+        Field::new("secondary_value", DataType::UInt64, false),
     ]);
 
     let batch = RecordBatch::try_new(
@@ -72,7 +75,8 @@ pub fn load_trace_file(path: &Path) -> Result<RecordBatch> {
             Arc::new(UInt64Array::from(batch_ids)),
             Arc::new(UInt64Array::from(flow_ids)),
             Arc::new(UInt64Array::from(event_types)),
-            Arc::new(UInt64Array::from(payloads)),
+            Arc::new(UInt64Array::from(primary)),
+            Arc::new(UInt64Array::from(secondary)),
         ],
     )?;
 
@@ -91,6 +95,7 @@ struct JsonEvent {
     category: String,
     description: String,
     module: String,
+    value_type: u8,
 }
 
 pub fn load_schema_file(path: &Path) -> Result<RecordBatch> {
@@ -103,6 +108,7 @@ pub fn load_schema_file(path: &Path) -> Result<RecordBatch> {
     let mut categories = Vec::with_capacity(count);
     let mut descriptions = Vec::with_capacity(count);
     let mut modules = Vec::with_capacity(count);
+    let mut value_types = Vec::with_capacity(count);
 
     for event in schema_json.events {
         ids.push(event.value);
@@ -110,6 +116,7 @@ pub fn load_schema_file(path: &Path) -> Result<RecordBatch> {
         categories.push(event.category);
         descriptions.push(event.description);
         modules.push(event.module);
+        value_types.push(event.value_type);
     }
 
     let schema = Schema::new(vec![
@@ -118,6 +125,7 @@ pub fn load_schema_file(path: &Path) -> Result<RecordBatch> {
         Field::new("category", DataType::Utf8, false),
         Field::new("description", DataType::Utf8, false),
         Field::new("module", DataType::Utf8, false),
+        Field::new("value_type", DataType::UInt8, false),
     ]);
 
     let batch = RecordBatch::try_new(
@@ -128,6 +136,7 @@ pub fn load_schema_file(path: &Path) -> Result<RecordBatch> {
             Arc::new(StringArray::from(categories)),
             Arc::new(StringArray::from(descriptions)),
             Arc::new(StringArray::from(modules)),
+            Arc::new(UInt8Array::from(value_types)),
         ],
     )?;
 

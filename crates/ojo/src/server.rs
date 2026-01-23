@@ -102,7 +102,7 @@ impl fmt::Display for Query {
                 flow_ids,
                 event_ids,
             } => {
-                write!(f, "SELECT ts_delta_ns, batch_id, flow_id, event_type, payload FROM events")?;
+                write!(f, "SELECT ts_delta_ns, batch_id, flow_id, event_type, primary_value, secondary_value FROM events")?;
 
                 let mut clauses: Vec<String> = Vec::new();
                 if !flow_ids.is_empty() {

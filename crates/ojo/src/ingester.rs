@@ -50,6 +50,7 @@ impl Ingester {
                 category TEXT,
                 description TEXT,
                 module TEXT,
+                value_type UBYTE,
                 PRIMARY KEY (id)
             );
             -- Event data
@@ -58,7 +59,8 @@ impl Ingester {
                 batch_id UBIGINT,
                 flow_id UBIGINT,
                 event_type UBIGINT,
-                payload UBIGINT,
+                primary_value UBIGINT,
+                secondary_value UBIGINT,
                 FOREIGN KEY (event_type) REFERENCES event_schemas(id)
             );
             ",

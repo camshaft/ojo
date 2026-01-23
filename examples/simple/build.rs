@@ -3,12 +3,17 @@ use ojo_builder::{Builder, EventInfo};
 fn main() {
     Builder::new()
         .add_event(EventInfo {
-            name: "PACKET_SENT".to_string(),
+            name: "OFFSET_SENT".to_string(),
             category: "Packet".to_string(),
             description: "Packet was sent to the network".to_string(),
         })
         .add_event(EventInfo {
-            name: "PACKET_ACKED".to_string(),
+            name: "OFFSET_RETRANSMITTED".to_string(),
+            category: "Packet".to_string(),
+            description: "Packet was retransmitted".to_string(),
+        })
+        .add_event(EventInfo {
+            name: "OFFSET_ACKED".to_string(),
             category: "Packet".to_string(),
             description: "Packet was acknowledged by peer".to_string(),
         })

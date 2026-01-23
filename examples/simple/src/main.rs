@@ -11,6 +11,7 @@
 
 use ojo_client::{Builder, EventRecord, Tracer};
 use std::{
+    ops::Range,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -25,6 +26,14 @@ mod events {
 
 static FLOW_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+fn random_delay() {
+    let delay = rand::random_range(0..10);
+    if delay > 0 {
+        // Introduce a small random delay to simulate network latency
+        thread::sleep(Duration::from_millis(delay));
+    }
+}
+
 fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
     let flow_id = FLOW_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = || start_time.elapsed().as_nanos() as u64;
@@ -37,66 +46,77 @@ fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
         );
     }
 
-    // Initial congestion window
-    tracer.record(EventRecord {
-        ts_delta_ns: ts(),
-        flow_id,
-        event_type: events::CWND_UPDATED,
-        payload: 10_000,
-    });
-
     // Send some packets
-    let packet_count = 5 + (flow_id % 10); // variable packet count
-    for packet_num in 1..=packet_count {
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::PACKET_SENT,
-            payload: packet_num,
-        });
-        thread::sleep(Duration::from_millis(5));
-    }
+    let packet_count = rand::random_range(2..2000);
 
-    // Acknowledge some packets
-    for packet_num in 1..=(packet_count - 2) {
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::PACKET_ACKED,
-            payload: packet_num,
-        });
-        thread::sleep(Duration::from_millis(2));
-    }
+    let (tx, rx) = std::sync::mpsc::channel::<Range<u64>>();
+    let (lost_tx, lost_rx) = std::sync::mpsc::channel::<Range<u64>>();
 
-    // Occasional packet loss
-    if flow_id % 3 == 0 {
-        let lost_packet = packet_count - 1;
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::PACKET_LOST_TIMEOUT,
-            payload: lost_packet,
+    std::thread::scope(|s| {
+        // Main transmission thread
+        s.spawn({
+            let tx = tx.clone();
+            move || {
+                let mut offset = 0;
+                for _ in 1..=packet_count {
+                    let packet_size = rand::random_range(500..1500);
+                    let start = offset;
+                    let end = start + packet_size;
+                    offset = end;
+
+                    tracer.record(EventRecord {
+                        ts_delta_ns: ts(),
+                        flow_id,
+                        event_type: events::OFFSET_SENT,
+                        primary: start,
+                        secondary: end,
+                    });
+                    tx.send(start..end).unwrap();
+
+                    random_delay();
+                }
+            }
         });
 
-        // Update congestion window after loss
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::CWND_UPDATED,
-            payload: 5_000,
+        // Retransmission thread
+        s.spawn(move || {
+            while let Ok(range) = lost_rx.recv() {
+                // Retransmit after some delay
+                random_delay();
+                tracer.record(EventRecord {
+                    ts_delta_ns: ts(),
+                    flow_id,
+                    event_type: events::OFFSET_RETRANSMITTED,
+                    primary: range.start,
+                    secondary: range.end,
+                });
+                tx.send(range).unwrap();
+            }
         });
-    }
 
-    // Open a stream occasionally
-    if flow_id % 5 == 0 {
-        let stream_id = flow_id * 10;
-        tracer.record(EventRecord {
-            ts_delta_ns: ts(),
-            flow_id,
-            event_type: events::STREAM_OPENED,
-            payload: stream_id,
+        // Main ACK processing thread
+        s.spawn(move || {
+            while let Ok(range) = rx.recv() {
+                // Randomly decide if the packet is lost
+                if rand::random::<f32>() < 0.05 {
+                    lost_tx.send(range).unwrap();
+                    continue;
+                }
+
+                let start = range.start;
+                let end = range.end;
+
+                tracer.record(EventRecord {
+                    ts_delta_ns: ts(),
+                    flow_id,
+                    event_type: events::OFFSET_ACKED,
+                    primary: start,
+                    secondary: end,
+                });
+                random_delay();
+            }
         });
-    }
+    });
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

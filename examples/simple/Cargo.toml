@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 ojo-client = { path = "../../crates/ojo-client" }
+rand = "0.9"
 
 [build-dependencies]
 ojo-builder = { path = "../../crates/ojo-builder" }

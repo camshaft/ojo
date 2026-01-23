@@ -106,7 +106,7 @@ impl FileHeader {
     }
 }
 
-/// Binary event record (32 bytes)
+/// Binary event record
 /// This is the record format for both the API and on-disk storage
 #[repr(C)]
 #[derive(Debug, Clone, Copy, AsBytes, FromBytes, FromZeroes)]
@@ -114,7 +114,8 @@ pub struct EventRecord {
     pub ts_delta_ns: u64, // Time delta from batch_start_ns
     pub flow_id: u64,
     pub event_type: u64,
-    pub payload: u64,
+    pub primary: u64,
+    pub secondary: u64,
 }
 
 /// Lock-free ring buffer for event storage
@@ -392,6 +393,7 @@ impl Builder {
             hasher.write(event.name.as_bytes());
             hasher.write(event.category.as_bytes());
             hasher.write(event.description.as_bytes());
+            hasher.write_u8(event.value_type as u8);
         }
         let schema_version = hasher.finish();
 
@@ -409,12 +411,13 @@ impl Builder {
                 w!(",");
             }
             w!(
-                "{{\"value\":{},\"name\":{:?},\"category\":{:?},\"description\":{:?},\"module\":{:?}}}",
+                "{{\"value\":{},\"name\":{:?},\"category\":{:?},\"description\":{:?},\"module\":{:?},\"value_type\":{}}}",
                 event.value,
                 event.name,
                 event.category,
                 event.description,
-                module
+                module,
+                event.value_type as u8
             );
         }
         w!("]}}");
@@ -554,7 +557,8 @@ fn flush_events_from_ring_buffer(state: &SharedState, batch_counter: &mut u64) -
             ts_delta_ns: 0,
             flow_id: u64::MAX,
             event_type: u64::MAX,
-            payload: dropped,
+            primary: dropped,
+            secondary: 0,
         };
         file.write_all(dropped_event.as_bytes())?;
     }
@@ -580,6 +584,21 @@ pub struct EventTypeInfo {
     pub category: &'static str,
     /// Human-readable description
     pub description: &'static str,
+    /// Whether the event includes a secondary value
+    pub value_type: ValueType,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
+pub enum ValueType {
+    None = 0,
+    Identifier = 1,
+    Count = 2,
+    Bytes = 3,
+    Duration = 4,
+    RangeCount = 5,
+    RangeBytes = 6,
+    RangeDuration = 7,
 }
 
 /// Event schema containing namespace and event type information
@@ -607,6 +626,7 @@ mod tests {
                 name: "PACKET_SENT",
                 category: "Packet",
                 description: "Packet sent",
+                value_type: ValueType::Identifier,
             }],
         };
 
@@ -666,7 +686,8 @@ mod tests {
                 ts_delta_ns: i * 1000,
                 flow_id: 1,
                 event_type: events::PACKET_SENT,
-                payload: i,
+                primary: i,
+                secondary: 0,
             });
         }
 
@@ -698,7 +719,8 @@ mod tests {
                 ts_delta_ns: i * 1000,
                 flow_id: 1,
                 event_type: events::PACKET_SENT,
-                payload: i,
+                primary: i,
+                secondary: 0,
             };
             assert!(buffer.write(&record));
         }
@@ -715,7 +737,7 @@ mod tests {
             assert_eq!(event.ts_delta_ns, i as u64 * 1000);
             assert_eq!(event.flow_id, 1);
             assert_eq!(event.event_type, events::PACKET_SENT);
-            assert_eq!(event.payload, i as u64);
+            assert_eq!(event.primary, i as u64);
         }
     }
 
@@ -732,7 +754,8 @@ mod tests {
                 ts_delta_ns: i,
                 flow_id: 1,
                 event_type: events::PACKET_SENT,
-                payload: i,
+                primary: i,
+                secondary: 0,
             };
             assert!(buffer.write(&record), "Failed to write record {}", i);
         }
@@ -742,7 +765,8 @@ mod tests {
             ts_delta_ns: 100,
             flow_id: 1,
             event_type: events::PACKET_SENT,
-            payload: 100,
+            primary: 100,
+            secondary: 0,
         };
         assert!(!buffer.write(&record));
 
@@ -761,7 +785,8 @@ mod tests {
             ts_delta_ns: 200,
             flow_id: 1,
             event_type: events::PACKET_SENT,
-            payload: 200,
+            primary: 200,
+            secondary: 0,
         };
         assert!(
             buffer.write(&record),
@@ -805,21 +830,24 @@ mod tests {
             ts_delta_ns: 0,
             flow_id,
             event_type: events::PACKET_CREATED,
-            payload: 1,
+            primary: 1,
+            secondary: 0,
         });
 
         tracer.record(EventRecord {
             ts_delta_ns: 1000,
             flow_id,
             event_type: events::PACKET_SENT,
-            payload: 1,
+            primary: 1,
+            secondary: 0,
         });
 
         tracer.record(EventRecord {
             ts_delta_ns: 2000,
             flow_id,
             event_type: events::PACKET_ACKED,
-            payload: 1,
+            primary: 1,
+            secondary: 0,
         });
 
         // Wait for flush
@@ -848,7 +876,8 @@ mod tests {
                         ts_delta_ns: i * 1000,
                         flow_id: thread_id,
                         event_type: events::PACKET_SENT,
-                        payload: i,
+                        primary: i,
+                        secondary: 0,
                     });
                 }
             });
