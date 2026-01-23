@@ -1,23 +1,33 @@
 import { useParams } from "react-router";
-import { useQuery } from "../hooks";
+import { useEventTypes, useQuery } from "../hooks";
 
 export function FlowDetail() {
-  const { flowId } = useParams();
+  const { batchId = "", flowId = "" } = useParams();
   const flows = useQuery({ kind: "flows" });
+  const eventTypes = useEventTypes();
 
-  // In a real app we might want to query specifically for this flow's events
-  // For now we will find the flow metadata from the list
-  const flow = flows
-    ? flows
-        .toArray()
-        .map((r) => r.toJSON())
-        .find((f: any) => String(f.flow_id) === flowId)
-    : null;
+  const eventsTable = useQuery({
+    kind: "events",
+    flow_ids: batchId !== null && flowId !== null ? [[batchId, flowId]] : [],
+  });
 
-  if (!flow) {
-    if (!flows) return <div>Loading...</div>;
+  if (!flows) return <div>Loading...</div>;
+
+  const flowRow = flows.toArray().find((r) => {
+    const obj = r.toJSON();
+    return String(obj.batch_id) === batchId && String(obj.flow_id) === flowId;
+  });
+
+  if (!flowRow) {
     return <div>Flow not found</div>;
   }
+
+  const events = eventsTable
+    ? eventsTable.toArray().map((row) => row.toJSON())
+    : [];
+
+  const flow = flowRow.toJSON();
+  console.log(events);
 
   return (
     <div className="space-y-6">
@@ -56,16 +66,59 @@ export function FlowDetail() {
         </div>
       </div>
 
-      {/* Placeholder for timeline - we need more detailed event data query for this */}
       <div className="bg-white shadow rounded-lg p-6">
         <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
-          Flow Timeline
+          Flow Events
         </h3>
-        <div className="text-gray-500 italic">
-          To visualize the flow timeline, we would need to fetch the individual
-          events for this flow. Currently the server only exposes aggregated
-          stats.
-        </div>
+        {!eventsTable && <div className="text-gray-500">Loading events...</div>}
+        {eventsTable && events.length === 0 && (
+          <div className="text-gray-500">No events found for this flow.</div>
+        )}
+        {eventsTable && events.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="min-w-full divide-y divide-gray-200">
+              <thead>
+                <tr>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Time (ms)
+                  </th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Event
+                  </th>
+                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Payload
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="bg-white divide-y divide-gray-200">
+                {events.slice(0, 500).map((event: any, idx: number) => {
+                  const eventType = eventTypes.get(String(event.event_type));
+                  return (
+                    <tr
+                      key={`${event.ts_delta_ns}-${idx}`}
+                      className="hover:bg-gray-50"
+                    >
+                      <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">
+                        {(Number(event.ts_delta_ns) / 1_000_000).toFixed(2)}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">
+                        {eventType?.name || `Event ${event.event_type}`}
+                      </td>
+                      <td className="px-4 py-2 whitespace-nowrap text-sm text-gray-900">
+                        {String(event.payload)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+            {events.length > 500 && (
+              <div className="text-xs text-gray-500 mt-2">
+                Showing first 500 events. Narrow filters to see more.
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

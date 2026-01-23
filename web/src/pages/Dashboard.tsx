@@ -91,7 +91,7 @@ export function Dashboard() {
             {flowsData.slice(0, 20).map((flow: any) => (
               <li key={`${flow.batch_id}-${flow.flow_id}`}>
                 <Link
-                  to={`/flow/${flow.flow_id}`}
+                  to={`/flow/${flow.batch_id}/${flow.flow_id}`}
                   className="block hover:bg-gray-50"
                 >
                   <div className="px-4 py-4 sm:px-6">

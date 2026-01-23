@@ -9,7 +9,7 @@ function App() {
       <Routes>
         <Route path="/" element={<Layout />}>
           <Route index element={<Dashboard />} />
-          <Route path="flow/:flowId" element={<FlowDetail />} />
+          <Route path="flow/:batchId/:flowId" element={<FlowDetail />} />
           {/* Fallback or other routes */}
           <Route path="*" element={<Dashboard />} />
         </Route>
