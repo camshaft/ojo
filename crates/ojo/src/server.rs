@@ -105,7 +105,7 @@ impl fmt::Display for Query {
                 if !event_ids.is_empty() {
                     write!(f, " WHERE event_type IN (")?;
                     for (idx, id) in event_ids.iter().enumerate() {
-                        let _ = write!(f, "{id}");
+                        write!(f, "{id}")?;
                         if idx + 1 != event_ids.len() {
                             f.write_char(',')?;
                         }
@@ -123,7 +123,7 @@ impl fmt::Display for Query {
                 if !event_ids.is_empty() {
                     write!(f, " WHERE event_type IN (")?;
                     for (idx, id) in event_ids.iter().enumerate() {
-                        let _ = write!(f, "{id}");
+                        write!(f, "{id}")?;
                         if idx + 1 != event_ids.len() {
                             f.write_char(',')?;
                         }
