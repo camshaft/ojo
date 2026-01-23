@@ -29,7 +29,19 @@ export type EventType = {
   name: string;
   description: string;
   module: string;
+  value_type: ValueType;
 };
+
+export enum ValueType {
+  None = 0,
+  Identifier = 1,
+  Count = 2,
+  Bytes = 3,
+  Duration = 4,
+  RangeCount = 5,
+  RangeBytes = 6,
+  RangeDuration = 7,
+}
 
 export function useEventTypes(): EventTypesMap {
   return useQueryTransform<EventTypesMap>({ kind: "event_types" }, (table) => {
@@ -37,11 +49,18 @@ export function useEventTypes(): EventTypesMap {
     if (!table) return eventTypes;
     for (const row of table) {
       const obj = row.toJSON();
+
+      let valueTypeNum = Number(obj.value_type);
+      if (isNaN(valueTypeNum) || valueTypeNum < 0 || valueTypeNum > 7) {
+        valueTypeNum = ValueType.None;
+      }
+
       eventTypes.set(String(obj.id), {
         id: String(obj.id),
         name: obj.name,
         description: obj.description,
         module: obj.module,
+        value_type: valueTypeNum,
       });
     }
     return eventTypes;

@@ -100,8 +100,11 @@ impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Query::Flows { event_ids } => {
-                write!(f, "SELECT batch_id, flow_id, min(ts_delta_ns) as start_ts, max(ts_delta_ns) as end_ts, count(*) as event_count FROM events")?;
-                
+                write!(
+                    f,
+                    "SELECT batch_id, flow_id, min(ts_delta_ns) as start_ts, max(ts_delta_ns) as end_ts, count(*) as event_count FROM events"
+                )?;
+
                 if !event_ids.is_empty() {
                     write!(f, " WHERE event_type IN (")?;
                     for (idx, id) in event_ids.iter().enumerate() {
@@ -112,14 +115,14 @@ impl fmt::Display for Query {
                     }
                     write!(f, ")")?;
                 }
-                
+
                 write!(f, " GROUP BY (batch_id, flow_id) ORDER BY start_ts DESC")?;
                 Ok(())
             }
             Query::EventTypes => "SELECT * FROM event_schemas".fmt(f),
             Query::Stats { event_ids } => {
                 write!(f, "SELECT event_type, count(*) as count FROM events")?;
-                
+
                 if !event_ids.is_empty() {
                     write!(f, " WHERE event_type IN (")?;
                     for (idx, id) in event_ids.iter().enumerate() {
@@ -130,7 +133,7 @@ impl fmt::Display for Query {
                     }
                     write!(f, ")")?;
                 }
-                
+
                 write!(f, " GROUP BY event_type")?;
                 Ok(())
             }
@@ -138,7 +141,10 @@ impl fmt::Display for Query {
                 flow_ids,
                 event_ids,
             } => {
-                write!(f, "SELECT ts_delta_ns, batch_id, flow_id, event_type, primary_value, secondary_value FROM events")?;
+                write!(
+                    f,
+                    "SELECT ts_delta_ns, batch_id, flow_id, event_type, primary_value, secondary_value FROM events"
+                )?;
 
                 let mut clauses: Vec<String> = Vec::new();
                 if !flow_ids.is_empty() {

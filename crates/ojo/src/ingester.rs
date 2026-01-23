@@ -50,7 +50,7 @@ impl Ingester {
                 category TEXT,
                 description TEXT,
                 module TEXT,
-                value_type UBYTE,
+                value_type UTINYINT,
                 PRIMARY KEY (id)
             );
             -- Event data

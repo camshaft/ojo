@@ -4,8 +4,12 @@
 
 use clap::{Parser, Subcommand};
 use duckdb::Connection;
-use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
-use std::{path::PathBuf, sync::Arc, sync::mpsc, time::Duration};
+use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::{
+    path::PathBuf,
+    sync::{Arc, mpsc},
+    time::Duration,
+};
 use tokio::sync::Notify;
 use tracing::{debug, error, info};
 
@@ -93,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
 
             let ingest_input = trace_dir.clone();
 
-            let conn = Connection::open(&db_file).expect("Failed to open database connection");
+            let conn = Connection::open_in_memory().unwrap();
 
             let ingester_conn = conn
                 .try_clone()
@@ -164,7 +168,12 @@ fn ingester_thread(mut ingester: Ingester, notify: Arc<Notify>) {
         let event_result = rx.recv_timeout(Duration::from_secs(5));
 
         match event_result {
-            Ok(Ok(event)) => {
+            Ok(Ok(
+                event @ Event {
+                    kind: EventKind::Create(_) | EventKind::Modify(_),
+                    ..
+                },
+            )) => {
                 debug!("File system event: {:?}", event);
                 // Process the ingestion
                 match ingester.ingest_all() {
@@ -177,6 +186,9 @@ fn ingester_thread(mut ingester: Ingester, notify: Arc<Notify>) {
                         error!("Ingestion error: {}", e);
                     }
                 }
+            }
+            Ok(Ok(event)) => {
+                tracing::trace!("File system event: {:?}", event);
             }
             Ok(Err(e)) => {
                 error!("Watch error: {:?}", e);

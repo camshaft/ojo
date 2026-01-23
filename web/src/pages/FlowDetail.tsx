@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useSearchParams } from "react-router";
 import * as Plot from "@observablehq/plot";
 import { Chart } from "../components/Chart";
-import { useEventTypes, useQuery } from "../hooks";
+import { useEventTypes, useQuery, ValueType } from "../hooks";
 
 type GraphType = "timeline" | "bar" | "metric";
 
@@ -15,17 +15,6 @@ type MetricBucket = {
   max: number;
   count: number;
 };
-
-enum ValueType {
-  None = 0,
-  Identifier = 1,
-  Count = 2,
-  Bytes = 3,
-  Duration = 4,
-  RangeCount = 5,
-  RangeBytes = 6,
-  RangeDuration = 7,
-}
 
 const GRAPH_OPTIONS: { id: GraphType; label: string; description: string }[] = [
   {
@@ -69,6 +58,7 @@ export function FlowDetail() {
     start: string;
     end: string;
   } | null>(null);
+  const rangeUpdateTimeout = useRef<number | null>(null);
   const flows = useQuery({ kind: "flows" });
   const eventTypes = useEventTypes();
 
@@ -222,25 +212,39 @@ export function FlowDetail() {
     setSearchParams(params);
   };
 
-  const handleRangeInputChange = (
-    field: "start" | "end",
-    newValue: string,
-  ) => {
+  const scheduleRangeParams = (fromMs: number | null, toMs: number | null) => {
+    if (rangeUpdateTimeout.current !== null) {
+      window.clearTimeout(rangeUpdateTimeout.current);
+    }
+    rangeUpdateTimeout.current = window.setTimeout(() => {
+      updateRangeParams(fromMs, toMs);
+      rangeUpdateTimeout.current = null;
+    }, 150);
+  };
+
+  const handleRangeInputChange = (field: "start" | "end", newValue: string) => {
     setRangeInputs((prev) => {
-      const start = field === "start" ? Number(newValue) : Number(prev?.start ?? "");
+      const start =
+        field === "start" ? Number(newValue) : Number(prev?.start ?? "");
       const end = field === "end" ? Number(newValue) : Number(prev?.end ?? "");
       const startValid = Number.isFinite(start);
       const endValid = Number.isFinite(end);
-      updateRangeParams(
-        startValid ? start : null,
-        endValid ? end : null,
-      );
+      scheduleRangeParams(startValid ? start : null, endValid ? end : null);
       return {
-        start: field === "start" ? newValue : prev?.start ?? "",
-        end: field === "end" ? newValue : prev?.end ?? "",
+        start: field === "start" ? newValue : (prev?.start ?? ""),
+        end: field === "end" ? newValue : (prev?.end ?? ""),
       };
     });
   };
+
+  useEffect(
+    () => () => {
+      if (rangeUpdateTimeout.current !== null) {
+        window.clearTimeout(rangeUpdateTimeout.current);
+      }
+    },
+    [],
+  );
 
   const toggleEvent = (id: string) => {
     const set = new Set(orderedSelectedEvents);
@@ -279,13 +283,11 @@ export function FlowDetail() {
     const metricRaw = filteredEvents
       .map((event: any) => {
         const id = String(event.event_type);
-        const name = eventTypes.get(id)?.name || `Event ${id}`;
+        const ty = eventTypes.get(id);
+        const name = ty?.name || `Event ${id}`;
         const value = Number(event.primary_value);
         const secondaryValue = Number(event.secondary_value);
-        let valueType = Number(event.value_type);
-        if (valueType < 0 || valueType > 7) {
-          valueType = ValueType.None;
-        }
+        let valueType = ty?.value_type || ValueType.None;
         if (!Number.isFinite(value)) return null;
         return {
           timeMs: Number(event.ts_delta_ns) / 1_000_000,
@@ -519,7 +521,7 @@ export function FlowDetail() {
         }),
       ],
     } satisfies Plot.PlotOptions;
-  }, [chartData, graphType]);
+  }, [chartData, graphType, effectiveRange]);
 
   const isLoading = !flows || !flowRow;
 
@@ -650,7 +652,7 @@ export function FlowDetail() {
                 <div className="flex items-center justify-between">
                   <span>Start (ms)</span>
                   <span className="text-xs font-mono text-gray-500">
-                    {rangeInputs?.start ?? ""}
+                    {formatDurationMs(Number(rangeInputs?.start ?? 0))}
                   </span>
                 </div>
                 <input
@@ -660,14 +662,16 @@ export function FlowDetail() {
                   min={chartData.timeDomain.min}
                   max={chartData.timeDomain.max}
                   value={rangeInputs?.start ?? ""}
-                  onChange={(e) => handleRangeInputChange("start", e.target.value)}
+                  onChange={(e) =>
+                    handleRangeInputChange("start", e.target.value)
+                  }
                 />
               </label>
               <label className="flex flex-col gap-2 text-sm text-gray-700">
                 <div className="flex items-center justify-between">
                   <span>End (ms)</span>
                   <span className="text-xs font-mono text-gray-500">
-                    {rangeInputs?.end ?? ""}
+                    {formatDurationMs(Number(rangeInputs?.end ?? 0))}
                   </span>
                 </div>
                 <input
@@ -677,13 +681,21 @@ export function FlowDetail() {
                   min={chartData.timeDomain.min}
                   max={chartData.timeDomain.max}
                   value={rangeInputs?.end ?? ""}
-                  onChange={(e) => handleRangeInputChange("end", e.target.value)}
+                  onChange={(e) =>
+                    handleRangeInputChange("end", e.target.value)
+                  }
                 />
               </label>
               <button
                 type="button"
                 className="inline-flex items-center justify-center rounded-md border border-gray-300 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
-                onClick={() => updateRangeParams(null, null)}
+                onClick={() => {
+                  if (rangeUpdateTimeout.current !== null) {
+                    window.clearTimeout(rangeUpdateTimeout.current);
+                    rangeUpdateTimeout.current = null;
+                  }
+                  updateRangeParams(null, null);
+                }}
               >
                 Reset
               </button>

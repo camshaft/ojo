@@ -6,19 +6,19 @@ fn main() {
             name: "OFFSET_SENT".to_string(),
             category: "Packet".to_string(),
             description: "Packet was sent to the network".to_string(),
-            value_type: ValueType::Bytes,
+            value_type: ValueType::RangeBytes,
         })
         .add_event(EventInfo {
             name: "OFFSET_RETRANSMITTED".to_string(),
             category: "Packet".to_string(),
             description: "Packet was retransmitted".to_string(),
-            value_type: ValueType::Bytes,
+            value_type: ValueType::RangeBytes,
         })
         .add_event(EventInfo {
             name: "OFFSET_ACKED".to_string(),
             category: "Packet".to_string(),
             description: "Packet was acknowledged by peer".to_string(),
-            value_type: ValueType::Bytes,
+            value_type: ValueType::RangeBytes,
         })
         .add_event(EventInfo {
             name: "STREAM_OPENED".to_string(),

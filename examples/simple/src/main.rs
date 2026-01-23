@@ -49,8 +49,8 @@ fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
     // Send some packets
     let packet_count = rand::random_range(2..2000);
 
-    let (tx, rx) = std::sync::mpsc::channel::<Range<u64>>();
-    let (lost_tx, lost_rx) = std::sync::mpsc::channel::<Range<u64>>();
+    let (tx, rx) = std::sync::mpsc::channel::<Option<Range<u64>>>();
+    let (lost_tx, lost_rx) = std::sync::mpsc::channel::<Option<Range<u64>>>();
 
     std::thread::scope(|s| {
         // Main transmission thread
@@ -71,16 +71,17 @@ fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
                         primary: start,
                         secondary: end,
                     });
-                    tx.send(start..end).unwrap();
+                    tx.send(Some(start..end)).unwrap();
 
                     random_delay();
                 }
+                tx.send(None).unwrap(); // Signal end of transmission
             }
         });
 
         // Retransmission thread
         s.spawn(move || {
-            while let Ok(range) = lost_rx.recv() {
+            while let Ok(Some(range)) = lost_rx.recv() {
                 // Retransmit after some delay
                 random_delay();
                 tracer.record(EventRecord {
@@ -90,16 +91,18 @@ fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
                     primary: range.start,
                     secondary: range.end,
                 });
-                tx.send(range).unwrap();
+                if tx.send(Some(range)).is_err() {
+                    break;
+                }
             }
         });
 
         // Main ACK processing thread
         s.spawn(move || {
-            while let Ok(range) = rx.recv() {
+            while let Ok(Some(range)) = rx.recv() {
                 // Randomly decide if the packet is lost
                 if rand::random::<f32>() < 0.05 {
-                    lost_tx.send(range).unwrap();
+                    lost_tx.send(Some(range)).unwrap();
                     continue;
                 }
 
@@ -115,6 +118,7 @@ fn simulate_connection(tracer: &Tracer, start_time: Instant, worker_id: u64) {
                 });
                 random_delay();
             }
+            lost_tx.send(None).unwrap(); // Signal end of lost packets
         });
     });
 }
