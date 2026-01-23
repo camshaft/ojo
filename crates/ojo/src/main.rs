@@ -134,7 +134,7 @@ fn ingester_thread(mut ingester: Ingester, notify: Arc<Notify>) {
     // Watch the raw and schema directories
     let raw_dir = ingester.raw_dir();
     let schema_dir = ingester.schema_dir();
-    
+
     if let Err(e) = watcher.watch(raw_dir, RecursiveMode::NonRecursive) {
         error!("Failed to watch raw directory: {}", e);
         return;
