@@ -4,7 +4,8 @@
 
 use clap::{Parser, Subcommand};
 use duckdb::Connection;
-use std::{path::PathBuf, sync::Arc};
+use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
+use std::{path::PathBuf, sync::Arc, sync::mpsc, time::Duration};
 use tokio::sync::Notify;
 use tracing::{debug, error, info};
 
@@ -118,15 +119,74 @@ async fn main() -> anyhow::Result<()> {
 fn ingester_thread(mut ingester: Ingester, notify: Arc<Notify>) {
     let mut last_snapshot: Option<std::time::Instant> = None;
 
+    // Create a channel for receiving file system events
+    let (tx, rx) = mpsc::channel();
+
+    // Create a watcher object
+    let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
+        Ok(w) => w,
+        Err(e) => {
+            error!("Failed to create file watcher: {}", e);
+            return;
+        }
+    };
+
+    // Watch the raw and schema directories
+    let raw_dir = ingester.raw_dir();
+    let schema_dir = ingester.schema_dir();
+    
+    if let Err(e) = watcher.watch(raw_dir, RecursiveMode::NonRecursive) {
+        error!("Failed to watch raw directory: {}", e);
+        return;
+    }
+    info!("Watching directory for changes: {:?}", raw_dir);
+
+    if let Err(e) = watcher.watch(schema_dir, RecursiveMode::NonRecursive) {
+        error!("Failed to watch schema directory: {}", e);
+        return;
+    }
+    info!("Watching directory for changes: {:?}", schema_dir);
+
+    // Do an initial ingestion
+    match ingester.ingest_all() {
+        Ok(true) => {
+            debug!("Initial data ingested, notifying listeners");
+            notify.notify_waiters();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            error!("Initial ingestion error: {}", e);
+        }
+    }
+
     loop {
-        match ingester.ingest_all() {
-            Ok(true) => {
-                debug!("New data ingested, notifying listeners");
-                notify.notify_waiters();
+        // Wait for file system events with a timeout to allow periodic snapshot exports
+        let event_result = rx.recv_timeout(Duration::from_secs(5));
+
+        match event_result {
+            Ok(Ok(event)) => {
+                debug!("File system event: {:?}", event);
+                // Process the ingestion
+                match ingester.ingest_all() {
+                    Ok(true) => {
+                        debug!("New data ingested, notifying listeners");
+                        notify.notify_waiters();
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        error!("Ingestion error: {}", e);
+                    }
+                }
             }
-            Ok(false) => {}
-            Err(e) => {
-                error!("Ingestion error: {}", e);
+            Ok(Err(e)) => {
+                error!("Watch error: {:?}", e);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // Timeout is expected, just continue
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                error!("Watcher disconnected");
+                break;
             }
         }
 
@@ -138,7 +198,5 @@ fn ingester_thread(mut ingester: Ingester, notify: Arc<Notify>) {
                 last_snapshot = Some(std::time::Instant::now());
             }
         }
-        // TODO use `notify` crate to watch for file changes instead of polling
-        std::thread::sleep(std::time::Duration::from_secs(1));
     }
 }

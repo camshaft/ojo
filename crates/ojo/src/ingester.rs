@@ -224,4 +224,12 @@ impl Ingester {
 
         Ok(())
     }
+
+    pub fn raw_dir(&self) -> &std::path::Path {
+        &self.raw_dir
+    }
+
+    pub fn schema_dir(&self) -> &std::path::Path {
+        &self.schema_dir
+    }
 }
