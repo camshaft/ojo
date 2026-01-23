@@ -13,8 +13,8 @@ use ojo_client::{Builder, EventRecord, Tracer};
 use std::{
     ops::Range,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     thread,
     time::{Duration, Instant},

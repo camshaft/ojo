@@ -2,8 +2,9 @@ use fnv::FnvHasher;
 use std::{collections::HashSet, env, fs::File, hash::Hasher, io::Write, path::Path};
 
 /// Value type for event payload - must match ojo_client::ValueType
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ValueType {
+    #[default]
     None,
     Identifier,
     Count,
@@ -12,12 +13,6 @@ pub enum ValueType {
     RangeCount,
     RangeBytes,
     RangeDuration,
-}
-
-impl Default for ValueType {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 #[derive(Clone, Debug)]

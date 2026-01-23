@@ -810,7 +810,7 @@ mod tests {
     fn test_binary_format_size() {
         // Verify expected sizes
         assert_eq!(std::mem::size_of::<FileHeader>(), 24);
-        assert_eq!(std::mem::size_of::<EventRecord>(), 32);
+        assert_eq!(std::mem::size_of::<EventRecord>(), 40);
     }
 
     #[test]
@@ -906,11 +906,11 @@ mod tests {
             .build()
             .unwrap();
 
-        // Check that schema file was created in output directory
-        let output_dir = temp_dir.path().join("raw");
+        // Check that schema file was created in schema directory
+        let schema_dir = temp_dir.path().join("schema");
 
         // Find schema file (name includes hash now)
-        let entries: Vec<_> = fs::read_dir(&output_dir)
+        let entries: Vec<_> = fs::read_dir(&schema_dir)
             .unwrap()
             .filter_map(Result::ok)
             .collect();
