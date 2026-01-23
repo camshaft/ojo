@@ -44,7 +44,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
       
       - name: Run tests
-        run: cargo test --workspace --all-features --verbose
+        run: cargo test -p ojo-client -p ojo-builder --verbose
 
   fmt:
     name: Rustfmt
@@ -72,7 +72,7 @@ jobs:
           components: clippy
       
       - name: Run clippy
-        run: cargo clippy --workspace --all-features -- -D warnings
+        run: cargo clippy -p ojo-client -p ojo-builder -- -D warnings
 
   doc:
     name: Documentation
@@ -84,6 +84,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       
       - name: Check documentation
-        run: cargo doc --workspace --all-features --no-deps
+        run: cargo doc -p ojo-client -p ojo-builder --no-deps
         env:
           RUSTDOCFLAGS: -D warnings

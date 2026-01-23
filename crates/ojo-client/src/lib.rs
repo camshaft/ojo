@@ -45,21 +45,24 @@
 //!     ts_delta_ns: 12345,
 //!     flow_id: 1,
 //!     event_type: events::PACKET_SENT,
-//!     payload: 100,
+//!     primary: 100, // packet number
+//!     secondary: 0,
 //! });
 //!
 //! tracer.record(EventRecord {
 //!     ts_delta_ns: 12350,
 //!     flow_id: 1,
 //!     event_type: events::PACKET_ACKED,
-//!     payload: 100,
+//!     primary: 100, // packet number
+//!     secondary: 0,
 //! });
 //!
 //! tracer.record(EventRecord {
 //!     ts_delta_ns: 12360,
 //!     flow_id: 1,
 //!     event_type: events::STREAM_OPENED,
-//!     payload: 10,
+//!     primary: 10, // stream ID
+//!     secondary: 0,
 //! });
 //!
 //! // Tracer automatically flushes on drop
@@ -452,7 +455,8 @@ impl Tracer {
     ///     ts_delta_ns: 12345, // Time delta from batch start
     ///     flow_id: 1,
     ///     event_type: events::PACKET_SENT,
-    ///     payload: 100, // packet number
+    ///     primary: 100, // packet number
+    ///     secondary: 0,
     /// };
     /// tracer.record(event);
     /// # }
