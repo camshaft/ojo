@@ -637,18 +637,20 @@ export function FlowDetail() {
                   value={rangeInputs?.start ?? ""}
                   onChange={(e) => {
                     const newStart = e.target.value;
-                    setRangeInputs((prev) => ({
-                      start: newStart,
-                      end: prev?.end ?? "",
-                    }));
-                    const start = Number(newStart);
-                    const end = Number(rangeInputs?.end ?? "");
-                    const startValid = Number.isFinite(start);
-                    const endValid = Number.isFinite(end);
-                    updateRangeParams(
-                      startValid ? start : null,
-                      endValid ? end : null,
-                    );
+                    setRangeInputs((prev) => {
+                      const start = Number(newStart);
+                      const end = Number(prev?.end ?? "");
+                      const startValid = Number.isFinite(start);
+                      const endValid = Number.isFinite(end);
+                      updateRangeParams(
+                        startValid ? start : null,
+                        endValid ? end : null,
+                      );
+                      return {
+                        start: newStart,
+                        end: prev?.end ?? "",
+                      };
+                    });
                   }}
                 />
               </label>
@@ -663,18 +665,20 @@ export function FlowDetail() {
                   value={rangeInputs?.end ?? ""}
                   onChange={(e) => {
                     const newEnd = e.target.value;
-                    setRangeInputs((prev) => ({
-                      start: prev?.start ?? "",
-                      end: newEnd,
-                    }));
-                    const start = Number(rangeInputs?.start ?? "");
-                    const end = Number(newEnd);
-                    const startValid = Number.isFinite(start);
-                    const endValid = Number.isFinite(end);
-                    updateRangeParams(
-                      startValid ? start : null,
-                      endValid ? end : null,
-                    );
+                    setRangeInputs((prev) => {
+                      const start = Number(prev?.start ?? "");
+                      const end = Number(newEnd);
+                      const startValid = Number.isFinite(start);
+                      const endValid = Number.isFinite(end);
+                      updateRangeParams(
+                        startValid ? start : null,
+                        endValid ? end : null,
+                      );
+                      return {
+                        start: prev?.start ?? "",
+                        end: newEnd,
+                      };
+                    });
                   }}
                 />
               </label>
