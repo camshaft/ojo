@@ -1,9 +1,9 @@
 import { Table, tableFromIPC } from "apache-arrow";
 
 export type Query =
-  | { kind: "flows" }
+  | { kind: "flows"; event_ids?: string[] }
   | { kind: "event_types" }
-  | { kind: "stats" }
+  | { kind: "stats"; event_ids?: string[] }
   | { kind: "events"; flow_ids?: [string, string][]; event_ids?: string[] };
 
 interface ServerMessage {

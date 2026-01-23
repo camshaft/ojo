@@ -79,9 +79,15 @@ enum ClientMessage {
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 enum Query {
-    Flows,
+    Flows {
+        #[serde(default)]
+        event_ids: Vec<MaybeBigInt>,
+    },
     EventTypes,
-    Stats,
+    Stats {
+        #[serde(default)]
+        event_ids: Vec<MaybeBigInt>,
+    },
     Events {
         #[serde(default)]
         flow_ids: Vec<[MaybeBigInt; 2]>,
@@ -93,11 +99,41 @@ enum Query {
 impl fmt::Display for Query {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Query::Flows => {
-                "SELECT batch_id, flow_id, min(ts_delta_ns) as start_ts, max(ts_delta_ns) as end_ts, count(*) as event_count FROM events GROUP BY (batch_id, flow_id) ORDER BY start_ts DESC".fmt(f)
+            Query::Flows { event_ids } => {
+                write!(f, "SELECT batch_id, flow_id, min(ts_delta_ns) as start_ts, max(ts_delta_ns) as end_ts, count(*) as event_count FROM events")?;
+                
+                if !event_ids.is_empty() {
+                    write!(f, " WHERE event_type IN (")?;
+                    for (idx, id) in event_ids.iter().enumerate() {
+                        let _ = write!(f, "{id}");
+                        if idx + 1 != event_ids.len() {
+                            f.write_char(',')?;
+                        }
+                    }
+                    write!(f, ")")?;
+                }
+                
+                write!(f, " GROUP BY (batch_id, flow_id) ORDER BY start_ts DESC")?;
+                Ok(())
             }
             Query::EventTypes => "SELECT * FROM event_schemas".fmt(f),
-            Query::Stats => "SELECT event_type, count(*) as count FROM events GROUP BY event_type".fmt(f),
+            Query::Stats { event_ids } => {
+                write!(f, "SELECT event_type, count(*) as count FROM events")?;
+                
+                if !event_ids.is_empty() {
+                    write!(f, " WHERE event_type IN (")?;
+                    for (idx, id) in event_ids.iter().enumerate() {
+                        let _ = write!(f, "{id}");
+                        if idx + 1 != event_ids.len() {
+                            f.write_char(',')?;
+                        }
+                    }
+                    write!(f, ")")?;
+                }
+                
+                write!(f, " GROUP BY event_type")?;
+                Ok(())
+            }
             Query::Events {
                 flow_ids,
                 event_ids,
