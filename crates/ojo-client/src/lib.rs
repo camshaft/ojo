@@ -8,7 +8,8 @@
 //! ## Features
 //!
 //! - **Lock-free**: Zero-allocation event recording with < 100ns per event
-//! - **Thread-safe**: Multi-writer, single-reader architecture
+//! - **Per-CPU collection**: Eliminates contention via per-CPU event pages
+//! - **Thread-safe**: Multi-writer, single-collector architecture
 //! - **Binary format**: Fixed-sized records for zero-copy parsing
 //! - **Streaming**: No pre-known event count, suitable for long-running traces
 //!
@@ -173,7 +174,18 @@ fn possible_cpus() -> usize {
 }
 
 /// Per-CPU event collection system
-/// This replaces the global ring buffer with per-CPU pages for better scalability
+///
+/// This replaces the global ring buffer with per-CPU pages for better scalability.
+/// Inspired by AWS s2n-quic's per-CPU approach using rseq on Linux.
+///
+/// Key benefits:
+/// - Eliminates contention on a single global atomic
+/// - Better CPU cache locality
+/// - Scales with number of threads/cores
+///
+/// Each CPU has its own page (EventPage) that threads write to. When a page fills up,
+/// events overflow to a fallback queue. The background flusher periodically collects
+/// all events from all CPU pages.
 struct PerCpuEventCollector {
     // Per-CPU pages - one atomic pointer per CPU
     per_cpu_pages: Box<[AtomicPtr<EventPage>]>,

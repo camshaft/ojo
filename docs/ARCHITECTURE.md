@@ -18,19 +18,26 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 - Configuration management
 - Lifecycle management (init/shutdown)
 
-#### Lock-free Ring Buffer
+#### Per-CPU Event Collection
 
-- Fixed-size circular buffer (default: 512 MiB)
-- Atomic operations for multi-writer access
+- Per-CPU pages for lock-free event recording (~256 KiB per CPU)
+- Each page holds up to 8K-1 event records
+- Thread-local CPU affinity to minimize contention
 - Zero-allocation on hot path
-- `Arc<Vec<u8>>` for shared memory
-- `AtomicUsize` for write_head and read_head pointers
+- Fallback queue for page overflow scenarios
+- Page pooling for efficient memory reuse
+- `AtomicPtr<EventPage>` per CPU for lock-free page access
 - `AtomicU64` for dropped event counter
+
+**Key Benefits**:
+- Eliminates CAS contention on single global atomic
+- Better CPU cache locality
+- Scales with number of threads/cores
+- Inspired by AWS s2n-quic per-CPU approach
 
 #### Background Flusher Thread
 
-- Single reader for the ring buffer
-- Periodic flushes (configurable interval)
+- Periodically collects events from all CPU pages
 - Writes to staging directory
 - Atomic moves to output directory
 - Handles dropped event recording
@@ -39,12 +46,13 @@ Ojo is a transport protocol event tracing system consisting of three main compon
 
 1. Application calls event recording method
 2. Event struct populated with timestamp and data
-3. Atomic CAS loop to reserve buffer space
-4. Memory copy to buffer (handles wrap-around)
-5. Release fence for visibility
-6. Flusher thread periodically reads buffer
-7. Writes batch to staging file
-8. Atomic rename to output directory
+3. Thread determines its CPU affinity (via thread-local hash)
+4. Atomic CAS to reserve slot in per-CPU page
+5. Write event to reserved slot
+6. Release fence for visibility
+7. Flusher thread periodically collects from all CPU pages
+8. Writes batch to staging file
+9. Atomic rename to output directory
 
 ### 2. ojo (CLI Tool)
 
@@ -192,19 +200,20 @@ Offset | Size | Field           | Type
 
 ### ojo-client
 
-**Multi-writer, Single-reader**:
+**Multi-writer, Single-collector**:
 
-- Multiple threads can record events concurrently
-- Lock-free CAS operations for buffer space reservation
-- Single background thread for flushing
+- Multiple threads can record events concurrently to per-CPU pages
+- Lock-free CAS operations for per-CPU page slot reservation
+- Thread-local CPU affinity reduces cross-CPU contention
+- Single background thread periodically collects from all pages
 - Memory fences ensure visibility across threads
 
 **Synchronization Points**:
 
-1. Buffer space reservation (CAS on write_head)
+1. Per-CPU page slot reservation (CAS on page length)
 2. Visibility fence after write
-3. Flush notification (condvar)
-4. Read head update after flush
+3. Page collection via atomic swap
+4. Fallback queue for overflow (RwLock protected)
 
 ### ojo (CLI tool)
 
