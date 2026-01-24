@@ -41,8 +41,10 @@ export function FlowDetail() {
   } = useFlowData(batchId, flowId);
 
   const height = 400;
-  const formatDurationMs = createDurationFormat(
-    flow ? Number(flow.start_ts) / 1_000_000 : 0,
+  const formatDurationMs = useMemo(
+    () =>
+      createDurationFormat(flow ? Number(flow.start_ts) / 1_000_000 : 0),
+    [flow],
   );
 
   const chartOptions = useMemo(() => {
@@ -149,7 +151,7 @@ export function FlowDetail() {
         }),
       ],
     } satisfies Plot.PlotOptions;
-  }, [chartData, graphType, effectiveRange, flow]);
+  }, [chartData, graphType, effectiveRange, formatDurationMs]);
 
   return (
     <div className="space-y-6">
