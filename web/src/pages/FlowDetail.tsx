@@ -149,7 +149,7 @@ export function FlowDetail() {
         }),
       ],
     } satisfies Plot.PlotOptions;
-  }, [chartData, graphType, effectiveRange, formatDurationMs]);
+  }, [chartData, graphType, effectiveRange, flow]);
 
   return (
     <div className="space-y-6">

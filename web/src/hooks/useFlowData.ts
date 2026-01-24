@@ -1,6 +1,6 @@
 import { useMemo, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
-import { useEventTypes, useQuery, ValueType } from "../hooks.ts";
+import { useEventTypes, useQuery, ValueType } from "../hooks";
 
 type GraphType = "timeline" | "bar" | "metric";
 
