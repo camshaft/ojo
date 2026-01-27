@@ -556,7 +556,7 @@ impl RseqCollector {
     }
 
     fn handle_events(&self, mut page: Box<Page>) {
-        let length = *page.length.get_mut() as usize;
+        let length = (*page.length.get_mut() as usize).min(SLOTS);
         let mut aggregate = self.aggregate.lock().unwrap();
         
         for i in 0..length {
