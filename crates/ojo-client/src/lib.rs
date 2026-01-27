@@ -2,15 +2,18 @@
 //!
 //! Low-overhead transport protocol event tracing client library.
 //!
-//! This library provides a lock-free, thread-safe event recording system
-//! for capturing transport protocol events with minimal overhead.
+//! This library provides a per-CPU buffer event recording system using
+//! Linux's Restartable Sequences (RSEQ) for capturing transport protocol
+//! events with minimal overhead and contention.
 //!
 //! ## Features
 //!
-//! - **Lock-free**: Zero-allocation event recording with < 100ns per event
+//! - **Per-CPU Buffers**: Uses RSEQ for lock-free per-CPU event recording
+//! - **Minimal Overhead**: < 100ns per event on average with no contention
 //! - **Thread-safe**: Multi-writer, single-reader architecture
 //! - **Binary format**: Fixed-sized records for zero-copy parsing
 //! - **Streaming**: No pre-known event count, suitable for long-running traces
+//! - **Automatic Fallback**: Falls back to lock-based queues on non-Linux platforms
 //!
 //! ## Example
 //!
@@ -77,14 +80,13 @@ use std::{
     hash::Hasher,
     io::{self, Write},
     path::PathBuf,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-    },
+    sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
+
+mod rseq;
 
 /// Binary file header (24 bytes)
 #[repr(C)]
@@ -121,163 +123,9 @@ pub struct EventRecord {
     pub secondary: u64,
 }
 
-/// Lock-free ring buffer for event storage
-struct RingBuffer {
-    buffer: *mut EventRecord,
-    write_head: AtomicUsize,
-    read_head: AtomicUsize,
-    dropped_count: AtomicU64,
-    capacity: usize,      // Number of records (must be power of 2)
-    capacity_mask: usize, // capacity - 1, for fast modulo
-}
-
-unsafe impl Send for RingBuffer {}
-unsafe impl Sync for RingBuffer {}
-
-impl RingBuffer {
-    fn new(capacity_bytes: usize) -> Self {
-        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-
-        // Calculate capacity in records
-        let mut capacity = capacity_bytes / RECORD_SIZE;
-
-        // Ensure capacity is at least 64 records
-        if capacity < 64 {
-            capacity = 64;
-        }
-
-        // Round up to next power of two
-        capacity = capacity.next_power_of_two();
-
-        let capacity_mask = capacity - 1;
-
-        // Allocate buffer
-        let layout = std::alloc::Layout::array::<EventRecord>(capacity).unwrap();
-        let buffer = unsafe { std::alloc::alloc(layout) as *mut EventRecord };
-
-        if buffer.is_null() {
-            panic!("Failed to allocate ring buffer");
-        }
-
-        Self {
-            buffer,
-            write_head: AtomicUsize::new(0),
-            read_head: AtomicUsize::new(0),
-            dropped_count: AtomicU64::new(0),
-            capacity,
-            capacity_mask,
-        }
-    }
-
-    /// Try to write an event record to the ring buffer
-    /// Returns true if successful, false if buffer is full
-    fn write(&self, record: &EventRecord) -> bool {
-        loop {
-            let write_pos = self.write_head.load(Ordering::Acquire);
-            let read_pos = self.read_head.load(Ordering::Acquire);
-
-            // Calculate used space (in records)
-            let used = write_pos.wrapping_sub(read_pos);
-
-            // Check if there's enough space (leave one slot to distinguish full from empty)
-            if used >= self.capacity - 1 {
-                // Buffer full, drop event
-                self.dropped_count.fetch_add(1, Ordering::Relaxed);
-                return false;
-            }
-
-            // Try to reserve space using CAS
-            let new_write_pos = write_pos.wrapping_add(1);
-            if self
-                .write_head
-                .compare_exchange(
-                    write_pos,
-                    new_write_pos,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                // CAS failed, retry
-                continue;
-            }
-
-            // Successfully reserved space, write the data
-            let index = write_pos & self.capacity_mask;
-            unsafe {
-                std::ptr::write(self.buffer.add(index), *record);
-            }
-
-            // Release fence to ensure visibility
-            std::sync::atomic::fence(Ordering::Release);
-            return true;
-        }
-    }
-
-    /// Read available events from the ring buffer using a callback
-    /// The callback receives slices of all available events
-    fn read<F>(&self, mut callback: F)
-    where
-        F: FnMut(&[EventRecord]),
-    {
-        let write_pos = self.write_head.load(Ordering::Acquire);
-        let read_pos = self.read_head.load(Ordering::Acquire);
-
-        // Calculate available records
-        let available = write_pos.wrapping_sub(read_pos);
-
-        if available == 0 {
-            return;
-        }
-
-        // Create slice from buffer (no wrap-around with masking)
-        let start_index = read_pos & self.capacity_mask;
-        let end_index = (read_pos + available) & self.capacity_mask;
-
-        unsafe {
-            if end_index > start_index || end_index == 0 {
-                // Contiguous read (or exactly at boundary)
-                let slice = std::slice::from_raw_parts(self.buffer.add(start_index), available);
-                callback(slice);
-            } else {
-                // Split read (wrapped around)
-                let first_part = self.capacity - start_index;
-                let second_part = available - first_part;
-
-                let first_slice =
-                    std::slice::from_raw_parts(self.buffer.add(start_index), first_part);
-                callback(first_slice);
-
-                if second_part > 0 {
-                    let second_slice = std::slice::from_raw_parts(self.buffer, second_part);
-                    callback(second_slice);
-                }
-            }
-        }
-
-        // Update read head
-        self.read_head
-            .store(read_pos + available, Ordering::Release);
-    }
-
-    /// Get and reset the dropped event count
-    fn take_dropped_count(&self) -> u64 {
-        self.dropped_count.swap(0, Ordering::Relaxed)
-    }
-}
-
-impl Drop for RingBuffer {
-    fn drop(&mut self) {
-        let layout = std::alloc::Layout::array::<EventRecord>(self.capacity).unwrap();
-        unsafe {
-            std::alloc::dealloc(self.buffer as *mut u8, layout);
-        }
-    }
-}
-
 /// Shared state between tracer and flusher thread
 struct SharedState {
-    ring_buffer: RingBuffer,
+    collector: rseq::RseqCollector,
     batch_start_ns: u64,
     schema_version: u64,
     staging_dir: PathBuf,
@@ -349,8 +197,8 @@ impl Builder {
         // Write schema file to output directory
         write_schema_file(&schema_dir, schema_version, &schema_json)?;
 
-        // Initialize ring buffer
-        let ring_buffer = RingBuffer::new(self.buffer_size);
+        // Initialize RSEQ collector
+        let collector = rseq::RseqCollector::new();
 
         // Get batch start timestamp
         let batch_start_ns = SystemTime::now()
@@ -360,7 +208,7 @@ impl Builder {
 
         // Create shared state
         let shared_state = Arc::new(SharedState {
-            ring_buffer,
+            collector,
             batch_start_ns,
             schema_version,
             staging_dir,
@@ -440,6 +288,10 @@ impl Tracer {
     /// The caller is responsible for populating the event structure,
     /// including the timestamp, flow_id, event_type, and payload.
     ///
+    /// This method uses per-CPU buffers with RSEQ for lock-free recording
+    /// on Linux systems, falling back to a queue-based approach on other
+    /// platforms.
+    ///
     /// # Example
     ///
     /// ```rust,no_run
@@ -462,8 +314,8 @@ impl Tracer {
     /// # }
     /// ```
     pub fn record(&self, record: EventRecord) {
-        // Write to ring buffer (lock-free)
-        self.shared_state.ring_buffer.write(&record);
+        // Write to RSEQ collector (lock-free per-CPU buffers)
+        self.shared_state.collector.record(record);
     }
 }
 
@@ -506,17 +358,27 @@ fn flusher_thread_main(state: Arc<SharedState>, flush_interval: Duration) {
     }
 }
 
-/// Flush events directly from ring buffer to a binary file
+/// Flush events from collector to a binary file
 fn flush_events_from_ring_buffer(state: &SharedState, batch_counter: &mut u64) -> io::Result<()> {
     // Check for dropped events
-    let dropped = state.ring_buffer.take_dropped_count();
+    let dropped = state.collector.take_dropped_count();
 
-    // Check if we have any data to write
-    let write_pos = state.ring_buffer.write_head.load(Ordering::Acquire);
-    let read_pos = state.ring_buffer.read_head.load(Ordering::Acquire);
-    let available = write_pos.wrapping_sub(read_pos);
+    let mut has_events = false;
+    let mut ts_delta_ns = None;
+    let mut event_buffer = Vec::new();
 
-    if available == 0 && dropped == 0 {
+    // Read events from collector
+    state.collector.read_events(|slice| {
+        if !slice.is_empty() {
+            has_events = true;
+            if ts_delta_ns.is_none() {
+                ts_delta_ns = Some(slice[0].ts_delta_ns);
+            }
+            event_buffer.extend_from_slice(slice);
+        }
+    });
+
+    if !has_events && dropped == 0 {
         return Ok(());
     }
 
@@ -537,23 +399,16 @@ fn flush_events_from_ring_buffer(state: &SharedState, batch_counter: &mut u64) -
     let header = FileHeader::new(state.batch_start_ns, state.schema_version);
     file.write_all(header.as_bytes())?;
 
-    let mut ts_delta_ns = None;
-
-    // Write events directly from ring buffer using callback
-    state.ring_buffer.read(|slice| {
-        if ts_delta_ns.is_none()
-            && let Some(first) = slice.first()
-        {
-            ts_delta_ns = Some(first.ts_delta_ns);
-        }
-        // Convert slice of EventRecords to bytes and write
+    // Write events
+    if !event_buffer.is_empty() {
         let bytes = unsafe {
-            std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice))
+            std::slice::from_raw_parts(
+                event_buffer.as_ptr() as *const u8,
+                std::mem::size_of_val(&event_buffer[..]),
+            )
         };
-        if let Err(e) = file.write_all(bytes) {
-            eprintln!("Error writing events to file: {}", e);
-        }
-    });
+        file.write_all(bytes)?;
+    }
 
     // Write dropped events record if any
     if dropped > 0 {
@@ -714,91 +569,6 @@ mod tests {
     }
 
     #[test]
-    fn test_ring_buffer_write_and_read() {
-        let buffer = RingBuffer::new(1024 * 1024);
-
-        // Write some events
-        for i in 0..10 {
-            let record = EventRecord {
-                ts_delta_ns: i * 1000,
-                flow_id: 1,
-                event_type: events::PACKET_SENT,
-                primary: i,
-                secondary: 0,
-            };
-            assert!(buffer.write(&record));
-        }
-
-        // Read events back using callback
-        let mut events = Vec::new();
-        buffer.read(|slice| {
-            events.extend_from_slice(slice);
-        });
-        assert_eq!(events.len(), 10);
-
-        // Verify event data
-        for (i, event) in events.iter().enumerate() {
-            assert_eq!(event.ts_delta_ns, i as u64 * 1000);
-            assert_eq!(event.flow_id, 1);
-            assert_eq!(event.event_type, events::PACKET_SENT);
-            assert_eq!(event.primary, i as u64);
-        }
-    }
-
-    #[test]
-    fn test_ring_buffer_overflow() {
-        // Create a small buffer
-        const RECORD_SIZE: usize = std::mem::size_of::<EventRecord>();
-        let buffer = RingBuffer::new(RECORD_SIZE * 10);
-
-        // The buffer will hold at least 64 records (minimum), so fill more
-        let capacity = 63; // Leave one slot
-        for i in 0..capacity {
-            let record = EventRecord {
-                ts_delta_ns: i,
-                flow_id: 1,
-                event_type: events::PACKET_SENT,
-                primary: i,
-                secondary: 0,
-            };
-            assert!(buffer.write(&record), "Failed to write record {}", i);
-        }
-
-        // Try to write more - should fail since buffer is now full
-        let record = EventRecord {
-            ts_delta_ns: 100,
-            flow_id: 1,
-            event_type: events::PACKET_SENT,
-            primary: 100,
-            secondary: 0,
-        };
-        assert!(!buffer.write(&record));
-
-        // Check dropped count
-        assert_eq!(buffer.take_dropped_count(), 1);
-
-        // Read some events to make space
-        let mut read_count = 0;
-        buffer.read(|slice| {
-            read_count += slice.len();
-        });
-        assert_eq!(read_count, 63); // All events should be read
-
-        // Now we should be able to write again
-        let record = EventRecord {
-            ts_delta_ns: 200,
-            flow_id: 1,
-            event_type: events::PACKET_SENT,
-            primary: 200,
-            secondary: 0,
-        };
-        assert!(
-            buffer.write(&record),
-            "Should be able to write after reading"
-        );
-    }
-
-    #[test]
     fn test_file_header_format() {
         let batch_start = 123456789u64;
         let schema_version = 1u64;
@@ -934,5 +704,94 @@ mod tests {
         assert!(schema_content.contains("PACKET_SENT"));
 
         drop(tracer);
+    }
+
+    #[test]
+    fn test_rseq_collector_basic() {
+        let collector = rseq::RseqCollector::new();
+
+        // Record some events
+        for i in 0..100 {
+            collector.record(EventRecord {
+                ts_delta_ns: i * 1000,
+                flow_id: 1,
+                event_type: events::PACKET_SENT,
+                primary: i,
+                secondary: 0,
+            });
+        }
+
+        // Read events back
+        let mut all_events = Vec::new();
+        collector.read_events(|events| {
+            all_events.extend_from_slice(events);
+        });
+
+        assert_eq!(all_events.len(), 100, "Should have 100 events");
+
+        // Verify events are recorded correctly
+        for (i, event) in all_events.iter().enumerate() {
+            assert_eq!(event.ts_delta_ns, i as u64 * 1000);
+            assert_eq!(event.flow_id, 1);
+            assert_eq!(event.event_type, events::PACKET_SENT);
+            assert_eq!(event.primary, i as u64);
+        }
+    }
+
+    #[test]
+    fn test_rseq_collector_concurrent() {
+        use std::sync::Arc;
+
+        let collector = Arc::new(rseq::RseqCollector::new());
+
+        // Spawn multiple threads recording events
+        let mut handles = vec![];
+        for thread_id in 0..8 {
+            let collector_clone = collector.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..50 {
+                    collector_clone.record(EventRecord {
+                        ts_delta_ns: i * 1000,
+                        flow_id: thread_id,
+                        event_type: events::PACKET_SENT,
+                        primary: i,
+                        secondary: 0,
+                    });
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Read all events
+        let mut all_events = Vec::new();
+        collector.read_events(|events| {
+            all_events.extend_from_slice(events);
+        });
+
+        // Should have 8 threads * 50 events = 400 events
+        assert_eq!(
+            all_events.len(),
+            400,
+            "Should have 400 events from 8 threads"
+        );
+
+        // Verify each thread's events
+        for thread_id in 0..8 {
+            let thread_events: Vec<_> = all_events
+                .iter()
+                .filter(|e| e.flow_id == thread_id)
+                .collect();
+            assert_eq!(
+                thread_events.len(),
+                50,
+                "Thread {} should have 50 events",
+                thread_id
+            );
+        }
     }
 }
