@@ -67,7 +67,8 @@ fn possible_cpus() -> usize {
         .max()
         .unwrap_or(0);
 
-    max_cpu.max(1)
+    // CPU numbering is zero-indexed, so max_cpu + 1 gives us the total count
+    max_cpu + 1
 }
 
 fn init_per_cpu() -> Box<[AtomicPtr<Page>]> {
@@ -279,8 +280,7 @@ impl RseqCollector {
                 subs {loop_count}, {loop_count}, #1
                 b.eq {fallback}
 
-                adrp {tmp}, 9b
-                ldr {tmp}, [{tmp}, #:lo12:9b]
+                adr {tmp}, 9b
                 str {tmp}, [{rseq_ptr}, #{rseq_cs_offset}]
 
                 2:
@@ -327,8 +327,10 @@ impl RseqCollector {
                 cpu_id_offset = const std::mem::offset_of!(Rseq, cpu_id),
                 cpu_id_offset_start = const std::mem::offset_of!(Rseq, cpu_id_start),
                 rseq_cs_offset = const std::mem::offset_of!(Rseq, rseq_cs),
+                // length_offset is too large for aarch64 constant offset (Page slots array is large)
                 length_offset = in(reg) std::mem::offset_of!(Page, length),
                 RSEQ_SIG = const RSEQ_SIG,
+                // SLOTS and RECORD_SIZE are too large for aarch64 constant
                 SLOTS = in(reg) SLOTS,
                 RECORD_SIZE = in(reg) std::mem::size_of::<EventRecord>(),
                 needs_new_page = label {
@@ -464,8 +466,7 @@ impl RseqCollector {
                 cset {fallback:w}, eq
                 b.eq 7f
 
-                adrp {tmp}, 12b
-                ldr {tmp}, [{tmp}, #:lo12:12b]
+                adr {tmp}, 12b
                 str {tmp}, [{rseq_ptr}, #{rseq_cs_offset}]
 
                 3:

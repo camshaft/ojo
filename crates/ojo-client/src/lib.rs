@@ -705,4 +705,89 @@ mod tests {
 
         drop(tracer);
     }
+
+    #[test]
+    fn test_rseq_collector_basic() {
+        let collector = rseq::RseqCollector::new();
+
+        // Record some events
+        for i in 0..100 {
+            collector.record(EventRecord {
+                ts_delta_ns: i * 1000,
+                flow_id: 1,
+                event_type: events::PACKET_SENT,
+                primary: i,
+                secondary: 0,
+            });
+        }
+
+        // Read events back
+        let mut all_events = Vec::new();
+        collector.read_events(|events| {
+            all_events.extend_from_slice(events);
+        });
+
+        assert_eq!(all_events.len(), 100, "Should have 100 events");
+
+        // Verify events are recorded correctly
+        for (i, event) in all_events.iter().enumerate() {
+            assert_eq!(event.ts_delta_ns, i as u64 * 1000);
+            assert_eq!(event.flow_id, 1);
+            assert_eq!(event.event_type, events::PACKET_SENT);
+            assert_eq!(event.primary, i as u64);
+        }
+    }
+
+    #[test]
+    fn test_rseq_collector_concurrent() {
+        use std::sync::Arc;
+
+        let collector = Arc::new(rseq::RseqCollector::new());
+
+        // Spawn multiple threads recording events
+        let mut handles = vec![];
+        for thread_id in 0..8 {
+            let collector_clone = collector.clone();
+            let handle = thread::spawn(move || {
+                for i in 0..50 {
+                    collector_clone.record(EventRecord {
+                        ts_delta_ns: i * 1000,
+                        flow_id: thread_id,
+                        event_type: events::PACKET_SENT,
+                        primary: i,
+                        secondary: 0,
+                    });
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Read all events
+        let mut all_events = Vec::new();
+        collector.read_events(|events| {
+            all_events.extend_from_slice(events);
+        });
+
+        // Should have 8 threads * 50 events = 400 events
+        assert_eq!(all_events.len(), 400, "Should have 400 events from 8 threads");
+
+        // Verify each thread's events
+        for thread_id in 0..8 {
+            let thread_events: Vec<_> = all_events
+                .iter()
+                .filter(|e| e.flow_id == thread_id)
+                .collect();
+            assert_eq!(
+                thread_events.len(),
+                50,
+                "Thread {} should have 50 events",
+                thread_id
+            );
+        }
+    }
 }
