@@ -3,7 +3,7 @@
 //! Low-overhead transport protocol event tracing client library.
 //!
 //! This library provides a per-CPU buffer event recording system using
-//! Linux's Restartable Sequences (RSEQ) for capturing transport protocol 
+//! Linux's Restartable Sequences (RSEQ) for capturing transport protocol
 //! events with minimal overhead and contention.
 //!
 //! ## Features
@@ -774,7 +774,11 @@ mod tests {
         });
 
         // Should have 8 threads * 50 events = 400 events
-        assert_eq!(all_events.len(), 400, "Should have 400 events from 8 threads");
+        assert_eq!(
+            all_events.len(),
+            400,
+            "Should have 400 events from 8 threads"
+        );
 
         // Verify each thread's events
         for thread_id in 0..8 {

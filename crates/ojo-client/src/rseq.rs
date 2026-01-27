@@ -13,8 +13,8 @@ use std::{
     mem::MaybeUninit,
     ptr::NonNull,
     sync::{
-        atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
         Mutex,
+        atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
     },
 };
 
@@ -80,19 +80,19 @@ fn init_per_cpu() -> Box<[AtomicPtr<Page>]> {
 /// Per-CPU event collector using RSEQ
 pub struct RseqCollector {
     per_cpu: Box<[AtomicPtr<Page>]>,
-    
+
     /// If true, RSEQ is not available and we must use fallback
     must_use_fallback: bool,
-    
+
     /// Fallback queue for when RSEQ fails or is unavailable
     fallback: parking_lot::RwLock<crossbeam_queue::SegQueue<EventRecord>>,
-    
+
     /// Pool of empty pages for reuse
     empty_pages: crossbeam_queue::SegQueue<Box<Page>>,
-    
+
     /// Aggregate storage for collected events
     aggregate: Mutex<Vec<EventRecord>>,
-    
+
     /// Counter for dropped events
     dropped_count: AtomicU64,
 }
@@ -558,12 +558,12 @@ impl RseqCollector {
     fn handle_events(&self, mut page: Box<Page>) {
         let length = (*page.length.get_mut() as usize).min(SLOTS);
         let mut aggregate = self.aggregate.lock().unwrap();
-        
+
         for i in 0..length {
             let event = unsafe { page.slots[i].assume_init() };
             aggregate.push(event);
         }
-        
+
         drop(aggregate);
 
         *page.length.get_mut() = 0;
